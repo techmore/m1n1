@@ -85,6 +85,12 @@
  * SIDs 0 and 16, of 32 streams each, so these SIDs are per SoC (struct dcp_soc .sids). Marker
  * apple,t6041-handoff; the nodes stay disabled.
  *
+ * T8132 (Mac mini M4, J773g only; nothing at all on J713 or another board or chip): on every boot,
+ * the __OS_LOG buffers of dcp, dcpext0 and dcpext1, taken from the ADT, are reserved, and nothing
+ * else is done here: no register access, no dry run, no opt-in. The three coprocessors run and
+ * write these buffers whether or not the kernel drives a display. The board's own HDMI handoff
+ * (kboot_display_j773g.c) runs first; an __OS_LOG node it published is found here and kept.
+ *
  * Fail-soft: dt_set_display_handoff() always returns 0; a failed check is logged and changes
  * nothing. Transactional: DT edits are made on a scratch copy that replaces the DT only if every
  * step succeeded. The __OS_LOG reservations and the armed handoff are separate transactions.
@@ -242,6 +248,7 @@ struct dcp_soc {
     bool log_streams;   /* log the DART stream registers, without the ADT description */
     bool sids;          /* the stream IDs and stream count below; otherwise SIDs 5/0/4 of 16 */
     bool oslog_in_rsv;  /* an __OS_LOG wholly inside a /memreserve/ is still given its node */
+    bool oslog_only;    /* every DCP __OS_LOG, nothing else: the board has its own handoff */
     u8 sid_dcp, sid_disp, sid_piodma, streams;
     const char *uuid;   /* DCP firmware image; NULL: none pinned, dry run only (unless any_uuid) */
     u32 os_fw;          /* enum fw_version the kernel's DCP interface is written for */
@@ -421,8 +428,33 @@ static const struct dcp_soc dcp_soc_t6041 = {
     .vm_size = DCP6_DART_VM_SIZE,
 };
 
+/*
+ * T8132 Mac mini M4 (J773g): only the __OS_LOG reservations of its three running display
+ * coprocessors (oslog_only). The HDMI pipe (dcpext0) is handed over by kboot_display_j773g.c, the
+ * J713 panel by kboot.c; neither goes through this file. As the J773g handoff, an __OS_LOG wholly
+ * inside a /memreserve/ still gets its node.
+ */
+static const char *const dcp_boards_t8132[] = {"apple,j773g", NULL};
+static const char *const dcp6_nubs_t8132[] = {"dcp", "dcpext0", "dcpext1"};
+
+static const struct dcp_soc dcp_soc_t8132 = {
+    .name = "T8132",
+    .chip = T8132,
+    .compat = "apple,t8132",
+    .boards = dcp_boards_t8132,
+    .boards_desc = "J773g",
+    .dcp_compat = "apple,t8132-dcpext",
+    .disp_compat = "apple,display-subsystem",
+    .marker = "apple,j773g-hdmi-handoff",
+    .board_gate = true,
+    .oslog_in_rsv = true,
+    .oslog_only = true,
+    .nubs = dcp6_nubs_t8132,
+    .nnubs = ARRAY_SIZE(dcp6_nubs_t8132),
+};
+
 static const struct dcp_soc *const dcp_socs[] = {&dcp_soc_t6030, &dcp_soc_t8122, &dcp_soc_t6031,
-                                                 &dcp_soc_t6041};
+                                                 &dcp_soc_t6041, &dcp_soc_t8132};
 
 struct dcp6_seg {
     u64 phys;
@@ -3073,6 +3105,13 @@ int dt_set_display_handoff(void *dt)
 
     if (dcp6.soc->board_gate && (chip_id != dcp6.soc->chip || !dcp6_board_ok(dt))) {
         dlog("not a %s (chip 0x%x): nothing done\n", dcp6.soc->boards_desc, chip_id);
+        return 0;
+    }
+
+    /* Only the __OS_LOG reservations: no register access, no dry run, no opt-in to arm */
+    if (dcp6.soc->oslog_only) {
+        dcp6_find_nubs();
+        dcp6_reserve_oslogs(dt);
         return 0;
     }
 

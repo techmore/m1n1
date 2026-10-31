@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * Host test of the Mac mini M4 (J773g) HDMI handoff in src/kboot_display_j773g.c.
+ * Host test of the Mac mini M4 (J773g) HDMI handoff in src/kboot_display_j773g.c, and of the
+ * __OS_LOG pass of src/kboot_display_handoff.c that dt_set_display() runs after it on J773g.
  *
  * A fake ADT, PMGR table, MMIO and DRAM stand in for the Mac (stand-in headers:
  * tests/t8122_display_host/, with tests/j773g_hdmi_host/ over them); libfdt is m1n1's own and
@@ -11,8 +12,10 @@
  *   j773g-hdmi-host list
  *   j773g-hdmi-host <scenario>
  *
- * Each scenario runs dt_set_j773g_hdmi_handoff() once (twice for "repeat"), checks the outcome
- * and prints "<scenario>: pass". tests/python/test_j773g_hdmi_handoff.py runs them all.
+ * Each scenario runs dt_set_j773g_hdmi_handoff() once (twice for "repeat"), checks the outcome,
+ * then runs dt_set_display_handoff() as kboot.c does next and checks the __OS_LOG reservations of
+ * dcp, dcpext0 and dcpext1 (by default all three, none on another chip or board), and prints
+ * "<scenario>: pass". tests/python/test_j773g_hdmi_handoff.py runs them all.
  *  PUBLISH: the whole contract is in the device tree and both DARTs are locked.
  *  NOTHING: no register access at all and the device tree byte for byte unchanged.
  *  REFUSE:  no register write, and the device tree unchanged but for
@@ -37,6 +40,7 @@
 #include "libfdt/libfdt.h"
 
 int dt_set_j773g_hdmi_handoff(void *dt);
+int dt_set_display_handoff(void *dt);
 
 void *adt = (void *)1;
 u32 chip_id;
@@ -433,6 +437,8 @@ static u32 ttbr_of(u64 l1)
 #define MARKER     "apple,j773g-hdmi-handoff"
 #define RESULT     "aurora,j773g-hdmi-handoff"
 #define NUB        "/arm-io/dcpext0/iop-dcpext0-nub"
+#define DCP_NUB    "/arm-io/dcp/iop-dcp-nub"
+#define EXT1_NUB   "/arm-io/dcpext1/iop-dcpext1-nub"
 
 #define PT_DCP_LO    (TB + 0x3ffe8c000ULL)
 #define PT_DCP_HI    (TB + 0x3ffebc000ULL)
@@ -460,6 +466,26 @@ static struct seg segs[NSEGS] = {
     {0x10003f30000ULL, 0xb2b000, 0x10003f30000ULL, 0x24000, 0xa},
     {0x103e3c6c000ULL, ~0ULL, 0x1000277c000ULL, 0x1000000, 2},
 };
+
+/* /arm-io/dcp/iop-dcp-nub and /arm-io/dcpext1/iop-dcpext1-nub of the J773g ADT */
+static const struct seg dcp_segs[6] = {
+    {0x100002a8000ULL, 0, 0x10001c4c000ULL, 0x806000, 1},
+    {0x103e4f94000ULL, 0x806000, 0x10002454000ULL, 0x325000, 0},
+    {0x10003f0c000ULL, 0xb2b000, 0x10003f0c000ULL, 0x24000, 0xa},
+    {0x103e5c1c000ULL, ~0ULL, 0x10000b70000ULL, 0x1000000, 2},
+    {0x103e5c18000ULL, ~0ULL, 0x10001b88000ULL, 0x4000, 2},
+    {0x103e5b58000ULL, ~0ULL, 0x10001b8c000ULL, 0xc0000, 2},
+};
+static const struct seg ext1_segs[4] = {
+    {0x100002a8000ULL, 0, 0x10001c4c000ULL, 0x806000, 1},
+    {0x103e3944000ULL, 0x806000, 0x10002454000ULL, 0x325000, 0},
+    {0x10003f54000ULL, 0xb2b000, 0x10003f54000ULL, 0x24000, 0xa},
+    {0x103e2944000ULL, ~0ULL, 0x1000277c000ULL, 0x1000000, 2},
+};
+
+/* The three __OS_LOG buffers: dcp, dcpext0, dcpext1 */
+static const u64 oslogs[3] = {0x10003f0c000ULL, 0x10003f30000ULL, 0x10003f54000ULL};
+#define OSLOG_SIZE 0x24000ULL
 
 static u64 seg_size(int s)
 {
@@ -503,6 +529,12 @@ static void world(const struct opts *o)
     prop_str(NUB, "uuid", UUID);
     prop_u32(NUB, "pre-loaded", 1);
     prop_u32(NUB, "running", 1);
+    prop_set(DCP_NUB, "segment-ranges", dcp_segs, sizeof(dcp_segs));
+    prop_str(DCP_NUB, "segment-names", "__TEXT;__DATA;__OS_LOG;unknown;unknown;unknown");
+    prop_str(DCP_NUB, "uuid", UUID);
+    prop_set(EXT1_NUB, "segment-ranges", ext1_segs, sizeof(ext1_segs));
+    prop_str(EXT1_NUB, "segment-names", "__TEXT;__DATA;__OS_LOG;unknown");
+    prop_str(EXT1_NUB, "uuid", UUID);
 
     const char *dd = "/arm-io/dart-dcpext0", *dp = "/arm-io/dart-dispext0";
     prop_str(dd, "compatible", "dart,t8110");
@@ -587,10 +619,10 @@ static void world(const struct opts *o)
 #define PIODMA_PATH  "/soc/dcp@286e00000/piodma"
 
 struct dt_opts {
-    const char *root_compat;
+    const char *root_compat, *soc_compat;
     bool no_dcpext0, wrong_dcp_compat, dcp_okay, dart_okay, wrong_sid, wrong_dart_reg, no_mbox,
         no_piodma, no_disp_alias, memory_region, resv_vram, memreserve_oslog,
-        memreserve_oslog_straddle;
+        memreserve_oslog_straddle, resv_dcp_oslog, resv_ext0_oslog;
     int free_space;
 };
 
@@ -656,7 +688,8 @@ static void *build_dt(const struct dt_opts *d)
     const char *rc = d->root_compat ? d->root_compat : "apple,j773g";
     char compat[96];
     int len = snprintf(compat, sizeof(compat), "%s", rc) + 1;
-    len += snprintf(compat + len, sizeof(compat) - len, "apple,t8132") + 1;
+    len += snprintf(compat + len, sizeof(compat) - len, "%s",
+                    d->soc_compat ? d->soc_compat : "apple,t8132") + 1;
     fdt_setprop(dt, root, "compatible", compat, len);
     setu32(dt, root, "#address-cells", 2);
     setu32(dt, root, "#size-cells", 2);
@@ -679,6 +712,11 @@ static void *build_dt(const struct dt_opts *d)
     setreg(dt, gpu, 0, 0);
     fdt_setprop_empty(dt, gpu, "no-map");
     sets(dt, gpu, "status", "disabled");
+    if (d->resv_dcp_oslog || d->resv_ext0_oslog) {
+        int other = sub(dt, "/reserved-memory", "other@1");
+        setreg(dt, other, (d->resv_dcp_oslog ? oslogs[0] : oslogs[1]) + 0x4000, 0x4000);
+        fdt_setprop_empty(dt, other, "no-map");
+    }
     if (d->resv_vram) {
         int other = sub(dt, "/reserved-memory", "other@0");
         setreg(dt, other, VRAM + 0x100000, 0x4000);
@@ -759,7 +797,7 @@ static void *build_dt(const struct dt_opts *d)
 
 done:
     if (d->memreserve_oslog)
-        fdt_add_mem_rsv(dt, segs[SEG_OSLOG].phys - 0x4000, 0x40000);
+        fdt_add_mem_rsv(dt, segs[SEG_OSLOG].phys, seg_size(SEG_OSLOG));
     if (d->memreserve_oslog_straddle)
         fdt_add_mem_rsv(dt, segs[SEG_OSLOG].phys + 0x4000, 0x40000);
     if (d->free_space) {
@@ -966,7 +1004,10 @@ struct scenario {
     struct opts hw;
     struct dt_opts dt;
     void (*adt)(void);
+    unsigned oslog; /* __OS_LOG nodes expected after the pass (bit n: oslogs[n]); 0: all three */
 };
+
+#define OSLOG_NONE 8
 
 static void adt_bad_uuid(void)
 {
@@ -1016,6 +1057,15 @@ static void adt_lock_fails(void)
 {
     protect_sticks = false;
 }
+static void adt_ext1_oslog_carveout(void)
+{
+    mcc_carveouts[0] = (struct mcc_carveout){oslogs[2] + 0x8000, 0x4000};
+    mcc_carveout_count = 1;
+}
+static void adt_other_soc(void)
+{
+    chip_id = 0x8112;
+}
 
 static const struct scenario scenarios[] = {
     {"publish", PUBLISH},
@@ -1024,9 +1074,15 @@ static const struct scenario scenarios[] = {
     {"publish-dcp-vram", PUBLISH, NULL, {.dcp_vram = true}},
     {"publish-piodma-empty", PUBLISH, NULL, {.piodma_empty = true}},
     {"publish-oslog-in-memreserve", PUBLISH, NULL, {}, {.memreserve_oslog = true}},
+    {"oslog-dcp-reserved", PUBLISH, NULL, {}, {.resv_dcp_oslog = true}, NULL, .oslog = 6},
+    {"oslog-ext1-carveout", PUBLISH, NULL, {}, {}, adt_ext1_oslog_carveout, .oslog = 3},
+    {"oslog-ext0-reserved", REFUSE, "device tree update", {}, {.resv_ext0_oslog = true}, NULL,
+     .oslog = 5},
     {"repeat", PUBLISH},
-    {"wrong-chip", NOTHING, NULL, {}, {}, adt_wrong_chip},
-    {"wrong-board", NOTHING, NULL, {}, {.root_compat = "apple,j713"}},
+    {"wrong-chip", NOTHING, NULL, {}, {}, adt_wrong_chip, .oslog = OSLOG_NONE},
+    {"wrong-board", NOTHING, NULL, {}, {.root_compat = "apple,j713"}, NULL, .oslog = OSLOG_NONE},
+    {"other-soc", NOTHING, NULL, {}, {.root_compat = "apple,j473", .soc_compat = "apple,t8112"},
+     adt_other_soc, .oslog = OSLOG_NONE},
     {"old-dt", NOTHING, NULL, {}, {.no_dcpext0 = true}},
     {"wrong-dcp-compat", NOTHING, NULL, {}, {.wrong_dcp_compat = true}},
     {"dcp-enabled", REFUSE_NO_MMIO, "device tree", {}, {.dcp_okay = true}},
@@ -1040,7 +1096,7 @@ static const struct scenario scenarios[] = {
     {"wrong-os", REFUSE_NO_MMIO, "firmware", {}, {}, adt_wrong_os},
     {"bad-uuid", REFUSE_NO_MMIO, "ADT", {}, {}, adt_bad_uuid},
     {"adt-not-running", REFUSE_NO_MMIO, "ADT", {}, {}, adt_not_running},
-    {"no-nub", REFUSE_NO_MMIO, "ADT", {}, {}, adt_no_nub},
+    {"no-nub", REFUSE_NO_MMIO, "ADT", {}, {}, adt_no_nub, .oslog = 5},
     {"no-adt-dart", REFUSE_NO_MMIO, "ADT", {}, {}, adt_wrong_dart},
     {"seg-flags", REFUSE_NO_MMIO, "ADT", {}, {}, adt_seg_flags},
     {"text-in-ram", REFUSE_NO_MMIO, "ADT", {}, {}, adt_text_in_ram},
@@ -1057,10 +1113,59 @@ static const struct scenario scenarios[] = {
     {"pt-outside", REFUSE, "DART mappings", {.pt_outside = true}},
     {"resv-conflict", REFUSE, "device tree update", {}, {.resv_vram = true}},
     {"oslog-memreserve-straddle", REFUSE, "device tree update", {},
-     {.memreserve_oslog_straddle = true}},
-    {"dt-full", REFUSE, "device tree update", {}, {.free_space = 256}},
+     {.memreserve_oslog_straddle = true}, NULL, .oslog = 1},
+    {"dt-full", REFUSE, "device tree update", {}, {.free_space = 256}, NULL, .oslog = OSLOG_NONE},
     {"lock-fails", REFUSE, "DART lock", {}, {}, adt_lock_fails},
 };
+
+/* After the __OS_LOG pass: exactly the expected dcp-oslog nodes, each once, nothing else */
+static void check_oslogs(void *dt, unsigned want)
+{
+    int resv = fdt_path_offset(dt, "/reserved-memory"), node, count = 0;
+    unsigned seen = 0;
+    fdt_for_each_subnode(node, dt, resv)
+    {
+        const char *name = fdt_get_name(dt, node, NULL);
+        if (!name || strncmp(name, "dcp-oslog@", 10))
+            continue;
+        count++;
+        int len = 0;
+        const fdt64_t *reg = fdt_getprop(dt, node, "reg", &len);
+        u64 base = reg && len == 16 ? fdt64_ld(&reg[0]) : 0;
+        for (int i = 0; i < 3; i++) {
+            char want_name[48];
+            snprintf(want_name, sizeof(want_name), "dcp-oslog@%llx", (unsigned long long)oslogs[i]);
+            if (base != oslogs[i])
+                continue;
+            seen |= 1u << i;
+            check(!strcmp(name, want_name) && fdt64_ld(&reg[1]) == OSLOG_SIZE &&
+                      fdt_getprop(dt, node, "no-map", NULL) &&
+                      fdt_getprop(dt, node, "apple,dcp-os-log", NULL) &&
+                      !fdt_getprop(dt, node, "iommu-addresses", NULL),
+                  "/reserved-memory/%s: 0x%llx+0x%llx, no-map, apple,dcp-os-log", name,
+                  (unsigned long long)oslogs[i], (unsigned long long)OSLOG_SIZE);
+        }
+    }
+    int n = !!(want & 1) + !!(want & 2) + !!(want & 4);
+    check(count == n && seen == want, "%d __OS_LOG node(s) (mask 0x%x), no duplicate (got %d, 0x%x)",
+          n, want, count, seen);
+}
+
+/* The __OS_LOG pass kboot.c runs after the HDMI handoff on J773g */
+static void oslog_pass(const struct scenario *sc, void *dt, int size)
+{
+    unsigned want = sc->oslog == OSLOG_NONE ? 0 : sc->oslog ? sc->oslog : 7;
+    void *before = malloc(size);
+    memcpy(before, dt, size);
+    int reads = mmio_reads, writes = mmio_writes;
+    check(dt_set_display_handoff(dt) == 0, "dt_set_display_handoff() returns 0");
+    check(mmio_reads == reads && mmio_writes == writes, "the __OS_LOG pass touches no register");
+    if (sc->oslog == OSLOG_NONE && strcmp(sc->name, "dt-full"))
+        check(!memcmp(before, dt, size), "the __OS_LOG pass leaves the device tree alone");
+    check_oslogs(dt, want);
+    check(fdt_check_full(dt, fdt_totalsize(dt)) == 0, "the device tree is valid after both");
+    free(before);
+}
 
 static int run(const struct scenario *sc)
 {
@@ -1101,7 +1206,8 @@ static int run(const struct scenario *sc)
             /* the same result on the original: everything else must be byte for byte the same */
             int chosen = fdt_path_offset(orig, "/chosen");
             fdt_setprop_string(orig, chosen, RESULT, want);
-            check(!memcmp(orig, dt, size), "refused: nothing but the result in the device tree");
+            check(!memcmp(orig, dt, size),
+                  "refused: nothing but the result in the device tree (before the __OS_LOG pass)");
             check(sc->dt.dcp_okay || !status_okay(dt, DCP_PATH), "refused: dcpext0 not enabled");
             if (!strcmp(sc->name, "lock-fails"))
                 check(mmio_writes == 1 && !(peek32(DART_DISP + 0x200) & 1),
@@ -1112,6 +1218,13 @@ static int run(const struct scenario *sc)
                 check(!mmio_reads, "refused before any register access");
             break;
         }
+    }
+    oslog_pass(sc, dt, size);
+    if (!strcmp(sc->name, "repeat")) {
+        memcpy(orig, dt, size);
+        check(dt_set_j773g_hdmi_handoff(dt) == 0 && dt_set_display_handoff(dt) == 0,
+              "a second boot pass returns 0");
+        check(!memcmp(orig, dt, size), "a second boot pass leaves the device tree alone");
     }
     free(orig);
     free(dt);
