@@ -5246,9 +5246,17 @@ static int dt_set_display(void)
         disp0_piodma_alias = compat_piodma_alias;
 
     if (chip_id == T8132) {
-        /* Mac mini M4: the HDMI pipe (dcpext0), only if the device tree describes it. */
-        if (!fdt_node_check_compatible(dt, 0, "apple,j773g"))
-            return dt_set_j773g_hdmi_handoff(dt);
+        /*
+         * Mac mini M4: the HDMI pipe (dcpext0), only if the device tree describes it, then the
+         * __OS_LOG buffers of all three display coprocessors on every boot. In this order: the
+         * HDMI handoff refuses a dcpext0 __OS_LOG that is already reserved, while the __OS_LOG
+         * pass keeps one the handoff published.
+         */
+        if (!fdt_node_check_compatible(dt, 0, "apple,j773g")) {
+            ret = dt_set_j773g_hdmi_handoff(dt);
+            dt_set_display_handoff(dt);
+            return ret;
+        }
         if (dt_set_j713_dcp_handoff())
             printf("FDT: J713 DCP handoff refused; keeping the boot framebuffer\n");
         return 0;
