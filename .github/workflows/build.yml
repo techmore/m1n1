@@ -18,7 +18,8 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Repo variable M1N1_RUNNER (JSON label list) selects a self-hosted runner.
+    runs-on: ${{ fromJSON(vars.M1N1_RUNNER || '"ubuntu-latest"') }}
 
     steps:
       - uses: actions/checkout@v7

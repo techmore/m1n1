@@ -71,7 +71,7 @@ jobs:
 
   arm64-native:
     name: Pytest (ubuntu-24.04-arm, native start.S)
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ fromJSON(vars.M1N1_RUNNER || '"ubuntu-24.04-arm"') }}
 
     steps:
       - name: Checkout code
