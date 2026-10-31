@@ -5438,25 +5438,6 @@ static int dt_set_pmp(void)
         printf("FDT: pmp not found in devtree\n");
         return 0;
     }
-    /* A J773g PMP alias is evidence-gathering only. Never start its owner
-     * until the mini's own power table and TVM ownership are qualified.
-     */
-    bool mini = chip_id == T8132 && !fdt_node_check_compatible(dt, 0, "apple,j773g");
-    if (mini) {
-        int len;
-        const char *status = fdt_getprop(dt, pmp_node, "status", &len);
-        if (!status || len != sizeof("disabled") || memcmp(status, "disabled", len))
-            bail("FDT: J773g PMP inspection node must remain disabled\n");
-        const void *marker = fdt_getprop(dt, pmp_node, "apple,j773g-pmp-inspect-only", &len);
-        if (!marker) {
-            if (len == -FDT_ERR_NOTFOUND)
-                return 0;
-            return -1;
-        }
-        if (len)
-            bail("FDT: malformed J773g PMP inspection marker\n");
-    }
-
     int chosen_anode = adt_path_offset(adt, "/chosen");
     if (chosen_anode < 0)
         bail("ADT: /chosen not found \n");
@@ -5489,8 +5470,7 @@ static int dt_set_pmp(void)
             bail("FDT: failed to transfer pmp tunable");
     }
     pmp_node = fdt_path_offset(dt, "pmp");
-    if (!mini)
-        fdt_setprop_string(dt, pmp_node, "status", "okay");
+    fdt_setprop_string(dt, pmp_node, "status", "okay");
     return 0;
 }
 
