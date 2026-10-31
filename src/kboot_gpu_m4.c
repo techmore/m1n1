@@ -61,7 +61,10 @@ static int publish_gpu_m4(void *dt)
     int gpu = fdt_path_offset(dt, "gpu");
     if (gpu < 0)
         return 0; /* A framebuffer-only DT needs no GPU handoff. */
-    if (chip_id != T8132 || fdt_node_check_compatible(dt, 0, "apple,j713") ||
+    /* J773g (Mac mini) has the same GPU apertures, IRQs and firmware segments. */
+    if (chip_id != T8132 ||
+        (fdt_node_check_compatible(dt, 0, "apple,j713") &&
+         fdt_node_check_compatible(dt, 0, "apple,j773g")) ||
         fdt_node_check_compatible(dt, gpu, "apple,agx-t8132"))
         return -1;
 
@@ -151,7 +154,7 @@ static int publish_gpu_m4(void *dt)
         fdt_setprop(dt, gpu, "apple,firmware-segment-flags", flags, sizeof(flags)) ||
         fdt_setprop_u32(dt, gpu, "apple,g16-handoff-version", 1))
         return -1;
-    printf("FDT: GPU: published J713 G16 memory resources without starting the GPU\n");
+    printf("FDT: GPU: published T8132 G16 memory resources without starting the GPU\n");
     return 0;
 }
 
@@ -177,6 +180,6 @@ int dt_set_gpu_m4(void *dt)
     }
     if (fdt_setprop_string(dt, gpu, "status", "disabled") && fdt_nop_node(dt, gpu))
         return -1; /* A corrupt DT cannot safely describe the failed device. */
-    printf("FDT: GPU: unqualified J713 handoff, disabling native GPU\n");
+    printf("FDT: GPU: unqualified T8132 handoff, disabling native GPU\n");
     return 0;
 }
