@@ -63,6 +63,7 @@ extern u64 relocated_from;
 
 int dt_set_gpu(void *dt);
 int dt_set_display_handoff(void *dt);
+int dt_set_j773g_hdmi_handoff(void *dt);
 
 u64 kboot_ram_base(void)
 {
@@ -5245,6 +5246,9 @@ static int dt_set_display(void)
         disp0_piodma_alias = compat_piodma_alias;
 
     if (chip_id == T8132) {
+        /* Mac mini M4: the HDMI pipe (dcpext0), only if the device tree describes it. */
+        if (!fdt_node_check_compatible(dt, 0, "apple,j773g"))
+            return dt_set_j773g_hdmi_handoff(dt);
         if (dt_set_j713_dcp_handoff())
             printf("FDT: J713 DCP handoff refused; keeping the boot framebuffer\n");
         return 0;
