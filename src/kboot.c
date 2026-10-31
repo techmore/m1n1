@@ -6846,10 +6846,10 @@ int kboot_prepare_dt(void *fdt)
     if (dart_reserve_legacy_tables(dt, cur_boot_args.phys_base, cur_boot_args.mem_size))
         bail("FDT: couldn't reserve inherited display translation tables\n");
 
-    u64 image_end = (u64)_end;
     /* Admit J773g only when its kernel explicitly describes the ANS handoff. */
     bool j773g_ans = chip_id == T8132 &&
         !fdt_node_check_compatible(dt, 0, "apple,j773g") && fdt_get_alias(dt, "ans");
+    u64 image_end = (u64)_end;
     if (display_dart_tables_inherited()) {
         /* chainload_image carries the previous stage's live heap in this
          * high-water mark. Tables that stage published into a locked display
