@@ -2,7 +2,7 @@ name: test
 
 on:
   push:
-    branches: [ main, integration/aurora, integration/neo ]
+    branches: [ main, integration/aurora, integration/neo, elementaryos-mseries ]
   pull_request:
     branches: [ main, integration/aurora, integration/neo ]
   workflow_dispatch:
