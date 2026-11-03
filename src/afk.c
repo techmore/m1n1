@@ -269,7 +269,7 @@ bool afk_rb_init(afk_epic_ep_t *epic, struct afk_rb *rb, u64 base, u64 size)
     }
 
     size_t block = (size - bufsz) / 3;
-    if (block < (1 << BLOCK_SHIFT) || block % (1 << BLOCK_SHIFT)) {
+    if (block < (1 << BLOCK_SHIFT) || block % (1 << BLOCK_SHIFT) || bufsz % block) {
         printf("AFK: invalid ring buffer block size 0x%lx\n", block);
         return false;
     }
@@ -555,7 +555,11 @@ static void afk_epic_rx_ack(afk_epic_ep_t *epic)
     dma_mb();
 
     rptr = ALIGN_UP(rptr + sizeof(*hdr) + hdr->size, rb->block_size);
-    assert(rptr <= rb->bufsz);
+    if (rptr > rb->bufsz) {
+        printf("EPIC[0x%02x]: queue entry runs past the ring, ignoring endpoint\n", epic->ep);
+        epic->broken = true;
+        return;
+    }
     if (rptr == rb->bufsz)
         rptr = 0;
     *rb->rptr = rptr;
@@ -564,6 +568,8 @@ static void afk_epic_rx_ack(afk_epic_ep_t *epic)
 int afk_epic_work(afk_epic_t *afk, int endpoint)
 {
     int i = 0;
+    /* A chatty IOP must not keep us here past the callers' deadlines. */
+    int budget = 64;
 
     while (i < 0x10) {
         afk_epic_ep_t *cur = afk->endpoint[i++];
@@ -588,6 +594,8 @@ int afk_epic_work(afk_epic_t *afk, int endpoint)
             int ret = afk_epic_poll(afk, endpoint, 0);
             if (ret < 0 || ret == EPIC_DATA_READY)
                 return ret;
+            if (--budget <= 0)
+                return 0;
             i = 0;
             continue;
         }
@@ -1430,7 +1438,7 @@ afk_epic_ep_t *afk_epic_start_ep_intf(afk_epic_t *afk, int endpoint,
     u64 deadline = timeout_calculate(AFK_START_TIMEOUT_US);
     while (!epic->started) {
         int ret = afk_epic_poll(epic->afk, epic->compact ? -1 : endpoint, deadline);
-        if (ret == EPIC_POLL_TIMEOUT) {
+        if (ret == EPIC_POLL_TIMEOUT || (!epic->started && timeout_expired(deadline))) {
             printf("EPIC: endpoint 0x%02x did not start\n", endpoint);
             goto err;
         } else if (ret < 0) {
@@ -1467,7 +1475,7 @@ int afk_epic_shutdown_ep(afk_epic_ep_t *epic)
     u64 deadline = timeout_calculate(AFK_SHUTDOWN_TIMEOUT_US);
     while (!ret && epic->started) {
         int r = afk_epic_poll(epic->afk, epic->compact ? -1 : epic->ep, deadline);
-        if (r == EPIC_POLL_TIMEOUT) {
+        if (r == EPIC_POLL_TIMEOUT || (epic->started && timeout_expired(deadline))) {
             printf("EPIC: endpoint 0x%02x did not stop\n", epic->ep);
             ret = -1;
         } else if (r < 0)

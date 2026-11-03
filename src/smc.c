@@ -100,15 +100,22 @@ static void smc_send(smc_dev_t *smc, u64 message)
 static int smc_cmd(smc_dev_t *smc, u64 message)
 {
     u8 id = smc->msgid++ & 0xF;
-    assert(!smc->outstanding[id]);
+    if (smc->outstanding[id]) {
+        printf("SMC: message id 0x%x still outstanding\n", id);
+        return -1;
+    }
     smc->outstanding[id] = true;
 
     message |= FIELD_PREP(SMC_MSG_ID, id);
 
     smc_send(smc, message);
+    /* overall bound: notifications must not extend the wait forever */
+    u64 deadline = timeout_calculate(SMC_TIMEOUT_US);
     while (smc->outstanding[id])
-        if (smc_work(smc) < 0)
+        if (smc_work(smc) < 0 || timeout_expired(deadline)) {
+            printf("SMC: command 0x%x got no answer\n", id);
             return -1;
+        }
 
     u64 result = smc->ret[id];
     u32 ret = FIELD_GET(SMC_RESULT_RESULT, result);
@@ -161,9 +168,10 @@ smc_dev_t *smc_init(void)
 
     smc_send(smc, initialize);
 
+    u64 deadline = timeout_calculate(SMC_TIMEOUT_US);
     while (!smc->shmem) {
         int ret = smc_work(smc);
-        if (ret < 0)
+        if (ret < 0 || (!smc->shmem && timeout_expired(deadline)))
             goto out_rtkit;
     }
 

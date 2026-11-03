@@ -469,14 +469,23 @@ int display_configure(const char *config)
     /* After boot DCP does not immediately report a connected display. Retry getting display
      * information for 2 seconds.
      */
-    /* J773g: HDMI sinks were seen to need ~6 s after the port connect. */
+    /* J773g: HDMI sinks were seen to need ~6 s after the port connect. The
+     * whole wait is bounded by time, not by the number of queries, since a
+     * single query can take up to the AFK command timeout. */
     int max_retries = dcp->compact ? 150 : DISPLAY_STATUS_RETRIES(display_is_dptx);
+    u64 hpd_deadline = timeout_calculate(15 * 1000000);
+    int failures = 0;
     while (retries++ < max_retries) {
+        if (dcp->compact && timeout_expired(hpd_deadline))
+            break;
         dcp_work(dcp);
         hpd = dcp_ib_get_hpd(iboot, &timing_cnt, &color_cnt);
         /* the latest query decides; an early failure may be followed by a good one */
         ret = hpd < 0 ? hpd : 0;
         if (hpd > 0 && timing_cnt && color_cnt)
+            break;
+        /* a DCP that keeps failing queries is not going to light up */
+        if (dcp->compact && hpd < 0 && ++failures >= 3)
             break;
         if (retries < max_retries) {
             /* keep servicing link training callbacks while waiting */
@@ -513,7 +522,13 @@ int display_configure(const char *config)
         printf("display: failed to get timing modes\n");
         return -1;
     }
-    assert(ret == timing_cnt);
+    if (ret == 0) {
+        printf("display: no timing modes\n");
+        return -1;
+    }
+    if (ret != timing_cnt)
+        printf("display: %d timing modes (status said %d)\n", ret, timing_cnt);
+    timing_cnt = ret;
     display_choose_timing_mode(tmodes, timing_cnt, &tbest, &want);
 
     dcp_color_mode_t *cmodes, cbest;
@@ -521,7 +536,13 @@ int display_configure(const char *config)
         printf("display: failed to get color modes\n");
         return -1;
     }
-    assert(ret == color_cnt);
+    if (ret == 0) {
+        printf("display: no color modes\n");
+        return -1;
+    }
+    if (ret != color_cnt)
+        printf("display: %d color modes (status said %d)\n", ret, color_cnt);
+    color_cnt = ret;
     display_choose_color_mode(cmodes, color_cnt, &cbest);
 
     // Set mode
