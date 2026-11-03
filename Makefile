@@ -312,7 +312,7 @@ build/%.rgba: data/%.png
 build/%.logo: build/%_256.rgba build/%_128.rgba
 	$(QUIET)echo "  PAYLOAD $@"
 	$(QUIET)mkdir -p "$(dir $@)"
-	$(QUIET)echo -n "m1n1_logo_256128" > $@
+	$(QUIET)printf "%s" "m1n1_logo_256128" > $@
 	$(QUIET)cat $^ >> $@
 
 -include $(DEPDIR)/*
