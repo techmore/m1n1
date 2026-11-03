@@ -104,6 +104,9 @@ static int dptx_phy_activate_t8122(dptx_phy_t *phy)
 
 int dptx_phy_activate(dptx_phy_t *phy)
 {
+    /* Callbacks can reach a port that has no PHY attached yet. */
+    if (!phy)
+        return -1;
     if (phy->type == DPTX_PHY_T8122)
         return dptx_phy_activate_t8122(phy);
 
@@ -289,6 +292,8 @@ int dptx_phy_activate(dptx_phy_t *phy)
 
 int dptx_phy_set_active_lane_count(dptx_phy_t *phy, u32 num_lanes)
 {
+    if (!phy)
+        return 0;
     /* T8122 registers are gated until the firmware activated the PHY. */
     if (phy->type == DPTX_PHY_T8122 && !phy->activation_complete)
         return 0;
@@ -346,6 +351,8 @@ int dptx_phy_set_link_rate(dptx_phy_t *phy, u32 link_rate)
     UNUSED(link_rate);
     u32 sts_1008, sts_1014;
 
+    if (!phy)
+        return 0;
     /* T8122 registers are gated until the firmware activated the PHY. */
     if (phy->type == DPTX_PHY_T8122 && !phy->activation_complete)
         return 0;

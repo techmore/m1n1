@@ -521,7 +521,8 @@ static int dptxport_call(afk_epic_service_t *service, u32 idx, const void *data,
             goto ack;
         case DPTX_APCALL_ACTIVATE:
             printf("DPTXPort: activating PHY\n");
-            dptx_phy_activate(dptx->phy);
+            if (dptx->phy)
+                dptx_phy_activate(dptx->phy);
             memcpy(reply, data, min(reply_size, data_size));
             if (reply_size > 4)
                 memset(reply, 0, 4);
