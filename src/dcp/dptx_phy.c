@@ -14,6 +14,7 @@
 enum dptx_type {
     DPTX_PHY_T8112,
     DPTX_PHY_T602X,
+    DPTX_PHY_T8122,
 };
 
 typedef struct dptx_phy {
@@ -21,10 +22,91 @@ typedef struct dptx_phy {
     enum dptx_type type;
     u32 dcp_index;
     u32 active_lanes;
+    u32 dcp_output;
+    bool activation_complete;
 } dptx_phy_t;
+
+static int dptx_phy_set_active_lane_count_raw(dptx_phy_t *phy, u32 num_lanes);
+
+/*
+ * T8122-style PHY (also used on T8132), ported from the Gravity Linux dptx PHY
+ * driver ("drm/apple: bring up T8132 DCP hotplug" by Niklas Sheth). Its
+ * registers are only reachable after DCP raised its internal PHY gate, which
+ * the firmware does right before the ACTIVATE callback; nothing touches them
+ * before that.
+ */
+static int dptx_phy_activate_t8122(dptx_phy_t *phy)
+{
+    u32 val;
+
+    phy->activation_complete = false;
+    printf("DPTX-PHY: T8122 activation (DCP %u)\n", phy->dcp_index);
+
+    /* Firmware raises the private PHY gate immediately before this callback. */
+    udelay(5000);
+
+    read32(phy->regs[1] + 0x10);
+    write32(phy->regs[1] + 0x10, phy->dcp_index);
+
+    set32(phy->regs[1] + 0x48, 0x010);
+    set32(phy->regs[1] + 0x48, 0x020);
+    clear32(phy->regs[1] + 0x48, 0x040);
+    set32(phy->regs[1] + 0x48, 0x100);
+    set32(phy->regs[1] + 0x48, 0x200);
+    clear32(phy->regs[1] + 0x48, 0x400);
+    set32(phy->regs[1] + 0x48, 0x001);
+    set32(phy->regs[1] + 0x48, 0x002);
+    clear32(phy->regs[1] + 0x48, 0x004);
+
+    val = read32(phy->regs[0] + 0x2014);
+    write32(phy->regs[0] + 0x2014, (val & ~0x3f0000) | (0x30 << 16));
+    set32(phy->regs[0] + 0x20b8, 0x010000);
+    clear32(phy->regs[0] + 0x2220, 0x0000002);
+    set32(phy->regs[0] + 0x222c, 0x000800);
+    set32(phy->regs[0] + 0x222c, 0x000100);
+    set32(phy->regs[0] + 0x2230, 0x0200000);
+    clear32(phy->regs[0] + 0x2278, 0x08000000);
+    set32(phy->regs[0] + 0x22a4, 0x0000001);
+
+    for (u32 loff = DPTX_LANE0_OFFSET; loff < DPTX_LANE_END; loff += DPTX_LANE_STRIDE) {
+        val = read32(phy->regs[0] + loff + 0x40);
+        write32(phy->regs[0] + loff + 0x40, (val & ~0xe00000) | 0x200000);
+    }
+    for (u32 loff = DPTX_LANE0_OFFSET; loff < DPTX_LANE_END; loff += DPTX_LANE_STRIDE)
+        set32(phy->regs[0] + loff + 0x40, 0x080000);
+    for (u32 loff = DPTX_LANE0_OFFSET; loff < DPTX_LANE_END; loff += DPTX_LANE_STRIDE)
+        clear32(phy->regs[0] + loff + 0x244, 0x10);
+
+    set32(phy->regs[0] + 0x2218, 0x001);
+    clear32(phy->regs[0] + 0x2234, 0x00000001);
+    set32(phy->regs[0] + 0x2200, 0x0002);
+    clear32(phy->regs[0] + 0x1000, 0x00000002);
+    set32(phy->regs[0] + 0x4004, 0x08);
+
+    dptx_phy_set_active_lane_count_raw(phy, 0);
+
+    set32(phy->regs[0] + 0xd000, 0);
+    set32(phy->regs[0] + 0x4224, 0);
+    set32(phy->regs[0] + 0x4224, 1);
+    set32(phy->regs[0] + 0x4200, 0x3c0);
+    set32(phy->regs[0] + 0x4200, 1);
+    read32(phy->regs[0] + 0x4204);
+    clear32(phy->regs[0] + 0x4200, 1);
+    read32(phy->regs[0] + 0x4210);
+    write32(phy->regs[0] + 0x4228, 0x2b0000);
+    set32(phy->regs[0] + 0x4228, 0x8000);
+
+    phy->activation_complete = true;
+    printf("DPTX-PHY: T8122 activation complete\n");
+
+    return 0;
+}
 
 int dptx_phy_activate(dptx_phy_t *phy)
 {
+    if (phy->type == DPTX_PHY_T8122)
+        return dptx_phy_activate_t8122(phy);
+
     // MMIO: R.4   0x23c500010 (dptx-phy[1], offset 0x10) = 0x0
     // MMIO: W.4   0x23c500010 (dptx-phy[1], offset 0x10) = 0x0
     read32(phy->regs[1] + 0x10);
@@ -169,7 +251,7 @@ int dptx_phy_activate(dptx_phy_t *phy)
     // MMIO: W.4   0x23c544404 (dptx-phy[0], offset 0x4404) = 0x555d444
     write32(phy->regs[0] + 0x4404, 0x555d444);
 
-    dptx_phy_set_active_lane_count(phy, 0);
+    dptx_phy_set_active_lane_count_raw(phy, 0);
 
     // MMIO: R.4   0x23c544200 (dptx-phy[0], offset 0x4200) = 0x4002430
     // MMIO: W.4   0x23c544200 (dptx-phy[0], offset 0x4200) = 0x4002420
@@ -206,6 +288,15 @@ int dptx_phy_activate(dptx_phy_t *phy)
 }
 
 int dptx_phy_set_active_lane_count(dptx_phy_t *phy, u32 num_lanes)
+{
+    /* T8122 registers are gated until the firmware activated the PHY. */
+    if (phy->type == DPTX_PHY_T8122 && !phy->activation_complete)
+        return 0;
+
+    return dptx_phy_set_active_lane_count_raw(phy, num_lanes);
+}
+
+static int dptx_phy_set_active_lane_count_raw(dptx_phy_t *phy, u32 num_lanes)
 {
     u32 l;
 
@@ -254,6 +345,10 @@ int dptx_phy_set_link_rate(dptx_phy_t *phy, u32 link_rate)
 {
     UNUSED(link_rate);
     u32 sts_1008, sts_1014;
+
+    /* T8122 registers are gated until the firmware activated the PHY. */
+    if (phy->type == DPTX_PHY_T8122 && !phy->activation_complete)
+        return 0;
 
     // MMIO: R.4   0x23c544004 (dptx-phy[0], offset 0x4004) = 0x49
     // MMIO: W.4   0x23c544004 (dptx-phy[0], offset 0x4004) = 0x49
@@ -304,13 +399,16 @@ int dptx_phy_set_link_rate(dptx_phy_t *phy, u32 link_rate)
 
     // MMIO: R.4   0x23c542220 (dptx-phy[0], offset 0x2220) = 0x11090a0
     // MMIO: W.4   0x23c542220 (dptx-phy[0], offset 0x2220) = 0x1109020
-    clear32(phy->regs[0] + 0x2220, 0x0000080);
+    if (phy->type == DPTX_PHY_T8122)
+        clear32(phy->regs[0] + 0x222c, 0x0000002);
+    else
+        clear32(phy->regs[0] + 0x2220, 0x0000080);
 
     // MMIO: R.4   0x23c5420b0 (dptx-phy[0], offset 0x20b0) = 0x1e0e01c2
     // MMIO: W.4   0x23c5420b0 (dptx-phy[0], offset 0x20b0) = 0x1e0e01c2
     u32 val_20b0 = read32(phy->regs[0] + 0x20b0);
     /* TODO: what happens on dptx-phy */
-    if (phy->type == DPTX_PHY_T602X)
+    if (phy->type == DPTX_PHY_T602X || phy->type == DPTX_PHY_T8122)
         val_20b0 = (val_20b0 & ~0x3ff) | 0x2a3;
     write32(phy->regs[0] + 0x20b0, val_20b0);
 
@@ -318,7 +416,7 @@ int dptx_phy_set_link_rate(dptx_phy_t *phy, u32 link_rate)
     // MMIO: W.4   0x23c5420b4 (dptx-phy[0], offset 0x20b4) = 0x7fffffe
     u32 val_20b4 = read32(phy->regs[0] + 0x20b4);
     /* TODO: what happens on dptx-phy */
-    if (phy->type == DPTX_PHY_T602X)
+    if (phy->type == DPTX_PHY_T602X || phy->type == DPTX_PHY_T8122)
         val_20b4 = (val_20b4 | 0x4000000) & ~0x0008000;
     write32(phy->regs[0] + 0x20b4, val_20b4);
 
@@ -326,7 +424,9 @@ int dptx_phy_set_link_rate(dptx_phy_t *phy, u32 link_rate)
     // MMIO: W.4   0x23c5420b4 (dptx-phy[0], offset 0x20b4) = 0x7fffffe
     val_20b4 = read32(phy->regs[0] + 0x20b4);
     /* TODO: what happens on dptx-phy */
-    if (phy->type == DPTX_PHY_T602X)
+    if (phy->type == DPTX_PHY_T8122)
+        val_20b4 &= ~0x0000002;
+    else if (phy->type == DPTX_PHY_T602X)
         val_20b4 = (val_20b4 | 0x0000001) & ~0x0000004;
     write32(phy->regs[0] + 0x20b4, val_20b4);
 
@@ -341,13 +441,14 @@ int dptx_phy_set_link_rate(dptx_phy_t *phy, u32 link_rate)
     // MMIO: R.4   0x23c5420b8 (dptx-phy[0], offset 0x20b8) = 0x654800
     // MMIO: W.4   0x23c5420b8 (dptx-phy[0], offset 0x20b8) = 0x654800
     /* TODO: unclear */
-    if (phy->type == DPTX_PHY_T602X)
+    if (phy->type == DPTX_PHY_T602X || phy->type == DPTX_PHY_T8122)
         set32(phy->regs[0] + 0x20b8, 0x010000);
     else
         set32(phy->regs[0] + 0x20b8, 0);
     // MMIO: R.4   0x23c5420b8 (dptx-phy[0], offset 0x20b8) = 0x654800
     // MMIO: W.4   0x23c5420b8 (dptx-phy[0], offset 0x20b8) = 0x454800
-    clear32(phy->regs[0] + 0x20b8, 0x200000);
+    if (phy->type != DPTX_PHY_T8122)
+        clear32(phy->regs[0] + 0x20b8, 0x200000);
 
     // MMIO: R.4   0x23c5420b8 (dptx-phy[0], offset 0x20b8) = 0x454800
     // MMIO: W.4   0x23c5420b8 (dptx-phy[0], offset 0x20b8) = 0x454800
@@ -454,6 +555,8 @@ u32 dptx_phy_dcp_output(dptx_phy_t *phy)
             return 5;
         case DPTX_PHY_T602X:
             return 4;
+        case DPTX_PHY_T8122:
+            return phy->dcp_output;
         default:
             return 5;
     }
@@ -474,6 +577,8 @@ dptx_phy_t *dptx_phy_init(const char *phy_node, u32 dcp_index)
         type = DPTX_PHY_T8112;
     else if (adt_is_compatible(adt, node, "dptx-phy,t602x"))
         type = DPTX_PHY_T602X;
+    else if (adt_is_compatible(adt, node, "dptx-phy,t8122"))
+        type = DPTX_PHY_T8122;
     else {
         printf("DPtx-phy: dptx-phy node %s is not compatible\n", phy_node);
         return NULL;
@@ -485,6 +590,11 @@ dptx_phy_t *dptx_phy_init(const char *phy_node, u32 dcp_index)
 
     phy->type = type;
     phy->dcp_index = dcp_index;
+
+    /* DCP's remote port target for this PHY (J773g: 4). */
+    phy->dcp_output = 4;
+    if (type == DPTX_PHY_T8122)
+        ADT_GETPROP(adt, node, "dp-switch-dfp-endpoint", &phy->dcp_output);
 
     if (adt_get_reg(adt, adt_phy_path, "reg", 0, &phy->regs[0], NULL) < 0) {
         printf("DPtx-phy: failed to get %s.reg[0]\n", phy_node);
