@@ -28,6 +28,43 @@ static char dcp_pmgr_dev[16] = "DISP0_CPU0";
 static u32 dcp_die;
 static u32 dcp_options;
 
+/*
+ * Set when a DCP may still be running after a failure: its endpoints or
+ * RTKit did not stop. Then its DART tables, RTKit buffers and IOVAs are kept
+ * (the firmware may still use them) and nothing touches the DCP again.
+ */
+static bool dcp_active_after_failure;
+
+bool dcp_left_active(void)
+{
+    return dcp_active_after_failure;
+}
+
+/* Stop what dcp_init() started; release memory only once the IOP has stopped. */
+static void dcp_release(dcp_dev_t *dcp, bool stop_iop)
+{
+    bool stopped = true;
+
+    if (dcp->afk && afk_epic_shutdown(dcp->afk) < 0)
+        stopped = false;
+    dcp->afk = NULL;
+    if (stop_iop && stopped && !rtkit_quiesce(dcp->rtkit))
+        stopped = false;
+
+    if (!stopped) {
+        printf("dcp: DCP did not stop; keeping its DART tables and buffers\n");
+        dcp_active_after_failure = true;
+        return;
+    }
+
+    if (dcp->rtkit)
+        rtkit_free(dcp->rtkit);
+    iovad_shutdown(dcp->iovad_dcp, dcp->dart_dcp);
+    dart_shutdown(dcp->dart_disp);
+    dart_shutdown(dcp->dart_dcp);
+    free(dcp);
+}
+
 void dcp_set_options(u32 options)
 {
     dcp_options = options;
@@ -94,9 +131,20 @@ static int dcp_t8132_start_aux(dcp_dev_t *dcp, int endpoint)
 static int dcp_t8132_hdmi_init(dcp_dev_t *dcp, const display_config_t *cfg)
 {
     bool minimal = dcp_options & DCP_OPT_MINIMAL;
+    u32 stage = DCP_OPT_STAGE(dcp_options);
+
+    if (stage == 1) {
+        printf("dcp: stage 1 (RTKit up) reached, stopping\n");
+        return -1;
+    }
 
     if (!(dcp_options & DCP_OPT_NO_SMC))
         dcp_t8132_hdmi_power(cfg);
+
+    if (stage == 2) {
+        printf("dcp: stage 2 (HDMI power) reached, stopping\n");
+        return -1;
+    }
 
     dcp->die = cfg->die;
     dcp->phy = dptx_phy_init(cfg->dptx_phy, cfg->dcp_index);
@@ -153,7 +201,37 @@ static int dcp_t8132_hdmi_init(dcp_dev_t *dcp, const display_config_t *cfg)
         return -1;
     }
 
+    if (stage == 3) {
+        printf("dcp: stage 3 (endpoints up) reached, stopping\n");
+        return -1;
+    }
+
     return 0;
+}
+
+/* Read-only checks before m1n1 touches the J773g display hardware at all. */
+static bool dcp_t8132_precheck(const display_config_t *cfg)
+{
+    const char *paths[] = {cfg->dcp, cfg->dcp_dart, cfg->disp_dart, cfg->dptx_phy,
+                           cfg->dp2hdmi_gpio};
+
+    for (size_t i = 0; i < ARRAY_SIZE(paths); i++) {
+        if (adt_path_offset(adt, paths[i]) < 0) {
+            printf("dcp: precheck: %s missing\n", paths[i]);
+            return false;
+        }
+    }
+    if (!adt_is_compatible(adt, adt_path_offset(adt, cfg->dptx_phy), "dptx-phy,t8122")) {
+        printf("dcp: precheck: unexpected dptx-phy\n");
+        return false;
+    }
+    /* m1n1 must not allocate DART tables of its own for the DCP */
+    if (!adt_getprop(adt, adt_path_offset(adt, cfg->dcp_dart), "pt-region-23", NULL) ||
+        !adt_getprop(adt, adt_path_offset(adt, cfg->disp_dart), "pt-region-0", NULL)) {
+        printf("dcp: precheck: DART page table regions missing\n");
+        return false;
+    }
+    return true;
 }
 
 static int dcp_hdmi_dptx_init(dcp_dev_t *dcp, const display_config_t *cfg)
@@ -281,6 +359,8 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
 
     if (cfg && cfg->dptx_phy[0]) {
         if (cfg->compact) {
+            if (dcp_active_after_failure || !dcp_t8132_precheck(cfg))
+                return NULL;
             /* the compact protocol is known for 26.6 DCP firmware only */
             if (os_firmware.version != V26_6 && os_firmware.version != V26_6_2) {
                 printf("dcp: T8132 HDMI needs 26.6 OS firmware (have %s)\n",
@@ -362,7 +442,8 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
 
     if (!rtkit_boot(dcp->rtkit)) {
         printf("dcp: failed to boot RTKit\n");
-        goto out_iovad;
+        /* a partial handshake may have handed buffers to the IOP */
+        goto out_rtkit;
     }
 
     dcp->afk = afk_epic_init(dcp->rtkit);
@@ -385,10 +466,10 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
     return dcp;
 
 out_afk:
-    afk_epic_shutdown(dcp->afk);
 out_rtkit:
-    rtkit_quiesce(dcp->rtkit);
-    rtkit_free(dcp->rtkit);
+    /* the IOP is running: stop it before any of its memory is released */
+    dcp_release(dcp, true);
+    return NULL;
 out_iovad:
     iovad_shutdown(dcp->iovad_dcp, dcp->dart_dcp);
     dart_shutdown(dcp->dart_disp);
@@ -410,6 +491,13 @@ int dcp_shutdown(dcp_dev_t *dcp, bool sleep)
     dcp_dptx_shutdown(dcp->dptx_ep);
     dcp_dpav_shutdown(dcp->dpav_ep);
     free(dcp->phy);
+
+    if (dcp->compact) {
+        /* 26.6: quiesce only, and keep everything if the DCP does not stop */
+        dcp_release(dcp, true);
+        return dcp_active_after_failure ? -1 : 0;
+    }
+
     afk_epic_shutdown(dcp->afk);
     if (sleep) {
         rtkit_sleep(dcp->rtkit);

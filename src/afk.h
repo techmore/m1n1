@@ -55,6 +55,7 @@ void afk_epic_set_compact(afk_epic_t *afk, bool compact);
 bool afk_epic_is_compact(afk_epic_ep_t *epic);
 int afk_epic_endpoint(afk_epic_ep_t *epic);
 void afk_epic_set_trace(bool trace);
+void afk_epic_set_deadline(u64 deadline);
 
 afk_epic_ep_t *afk_epic_start_ep(afk_epic_t *afk, int endpoint, const afk_epic_service_ops_t *ops,
                                  bool notify);

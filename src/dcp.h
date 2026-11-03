@@ -32,6 +32,9 @@ typedef struct {
 #define DCP_OPT_NO_IOMFB BIT(1) /* do not start the IOMFB transport endpoint */
 #define DCP_OPT_MINIMAL  BIT(2) /* start only DPAV, iBoot and DPTX endpoints */
 #define DCP_OPT_TRACE    BIT(3) /* log compact EPIC traffic */
+/* stop cleanly after this bring-up stage (1..5, 0 = full); for bisecting */
+#define DCP_OPT_STAGE_SHIFT 8
+#define DCP_OPT_STAGE(opts) (((opts) >> DCP_OPT_STAGE_SHIFT) & 0xf)
 
 #define DCP_MAX_AUX_EP 12
 
@@ -64,5 +67,6 @@ void dcp_set_options(u32 options);
 dcp_dev_t *dcp_init(const display_config_t *config);
 
 int dcp_shutdown(dcp_dev_t *dcp, bool sleep);
+bool dcp_left_active(void);
 
 #endif

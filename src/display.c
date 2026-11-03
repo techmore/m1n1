@@ -311,8 +311,11 @@ int display_start_dcp(void)
     }
 
     // determine frame buffer PA and size from "/vram"
-    u64 pa, size;
+    u64 pa = cur_boot_args.video.base;
+    u64 size = cur_boot_args.video.stride * cur_boot_args.video.height *
+               ((cur_boot_args.video.depth + 7) / 8);
     if (display_get_vram(&pa, &size)) {
+        pa = cur_boot_args.video.base;
         // use a safe fb_size
         fb_size = cur_boot_args.video.stride * cur_boot_args.video.height *
                   ((cur_boot_args.video.depth + 7) / 8);
@@ -322,6 +325,18 @@ int display_start_dcp(void)
 
     // Find the framebuffer DVA
     fb_dva = dart_search(dcp->dart_disp, (void *)cur_boot_args.video.base);
+    /*
+     * J773g: only scan out a framebuffer iBoot already mapped. Mappings m1n1
+     * makes may live in DART tables m1n1 frees at hand-off, which would pull
+     * the framebuffer from under U-Boot, Limine and Linux.
+     */
+    if (dcp->compact && (DART_IS_ERR(fb_dva) || !fb_dva)) {
+        printf("display: framebuffer is not mapped by iBoot, skipping display\n");
+        fb_dva = 0;
+        dcp_shutdown(dcp, false);
+        dcp = NULL;
+        return -1;
+    }
     // framebuffer is not mapped on the M1 Ultra Mac Studio
     if (DART_IS_ERR(fb_dva) || !fb_dva)
         fb_dva = display_map_fb(0, pa, size);
@@ -329,6 +344,7 @@ int display_start_dcp(void)
         printf("display: failed to find display DVA\n");
         fb_dva = 0;
         dcp_shutdown(dcp, false);
+        dcp = NULL;
         return -1;
     }
 
@@ -337,6 +353,7 @@ int display_start_dcp(void)
     if (!iboot) {
         printf("display: failed to initialize DCP iBoot interface\n");
         dcp_shutdown(dcp, false);
+        dcp = NULL;
         return -1;
     }
 
@@ -388,6 +405,8 @@ int display_parse_mode(const char *config, dcp_timing_mode_t *mode, struct displ
             opts->dcp_options |= DCP_OPT_MINIMAL;
         else if (!strncmp(option + 1, "trace", 5))
             opts->dcp_options |= DCP_OPT_TRACE;
+        else if (!strncmp(option + 1, "stage=", 6))
+            opts->dcp_options |= (atol(option + 7) & 0xf) << DCP_OPT_STAGE_SHIFT;
         option = strchr(option + 1, ',');
     }
 
@@ -424,18 +443,57 @@ static int display_swap(u64 iova, u32 stride, u32 width, u32 height)
     return 0;
 }
 
+static int display_configure_dcp(const char *config);
+
+/* Set after a J773g attempt failed: no further display work in this boot. */
+static bool display_compact_failed;
+
 int display_configure(const char *config)
 {
-    dcp_timing_mode_t want;
-    struct display_options opts = {0};
-
 #ifdef NO_DISPLAY
     printf("display: skip configuration (NO_DISPLAY)\n");
     return 0;
 #endif
 
+    const display_config_t *cfg = display_get_config();
+    if (!cfg || !cfg->compact)
+        return display_configure_dcp(config);
+
+    /*
+     * J773g: everything is opt-in and best effort. Bound the whole attempt,
+     * and on any failure stop the DCP again and carry on with the boot
+     * exactly as without display (the framebuffer and boot args stay as
+     * iBoot handed them over).
+     */
+    if (display_compact_failed || dcp_left_active()) {
+        printf("display: J773g display already failed in this boot, skipping\n");
+        return 0;
+    }
+
+    afk_epic_set_deadline(timeout_calculate(45 * 1000000));
+    int ret = display_configure_dcp(config);
+    afk_epic_set_deadline(0);
+
+    if (ret <= 0) {
+        printf("display: J773g HDMI not set up (%d), continuing without display\n", ret);
+        display_compact_failed = true;
+        /* dcp and iboot are either both set (stop them) or both clear */
+        display_shutdown(DCP_QUIESCED);
+        dcp = NULL;
+        return 0;
+    }
+
+    return ret;
+}
+
+static int display_configure_dcp(const char *config)
+{
+    dcp_timing_mode_t want;
+    struct display_options opts = {0};
+
     display_parse_mode(config, &want, &opts);
     dcp_set_options(opts.dcp_options);
+    u32 stage = DCP_OPT_STAGE(opts.dcp_options);
 
     u64 start_time = get_ticks();
 
@@ -448,6 +506,11 @@ int display_configure(const char *config)
         ret = dcp_connect_dptx(dcp);
         if (ret < 0)
             return ret;
+    }
+
+    if (dcp->compact && stage == 4) {
+        printf("display: stage 4 (DPTX connected) reached, stopping\n");
+        return -1;
     }
 
     if (!display_is_external) {
@@ -503,6 +566,11 @@ int display_configure(const char *config)
     }
 
     printf("display: connected:%d timing_cnt:%d color_cnt:%d\n", hpd, timing_cnt, color_cnt);
+
+    if (dcp->compact && stage == 5) {
+        printf("display: stage 5 (display status) reached, stopping\n");
+        return -1;
+    }
 
     if (!hpd || !timing_cnt || !color_cnt)
         return 0;
@@ -560,6 +628,13 @@ int display_configure(const char *config)
 
     size_t size =
         ALIGN_UP(tbest.width * tbest.height * ((cbest.bpp + 7) / 8) + 24 * SZ_16K, SZ_16K);
+
+    if (fb_size < size && dcp->compact) {
+        /* a new framebuffer would need new DART tables, see display_start_dcp() */
+        printf("display: mode needs 0x%zx bytes, framebuffer has 0x%lx; skipping\n", size,
+               fb_size);
+        return -1;
+    }
 
     if (fb_size < size) {
         printf("display: current framebuffer is too small for new mode\n");
@@ -743,6 +818,10 @@ void display_shutdown(dcp_shutdown_mode mode)
     if (!has_dcp)
         return;
 
+    /* A DCP that did not stop keeps its state; leave it alone. */
+    if (dcp_left_active())
+        return;
+
     if (iboot) {
         if (dcp->iboot == iboot)
             dcp->iboot = NULL;
@@ -769,5 +848,6 @@ void display_shutdown(dcp_shutdown_mode mode)
                 break;
         }
         iboot = NULL;
+        dcp = NULL;
     }
 }

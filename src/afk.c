@@ -238,6 +238,22 @@ enum RBEP_MSG {
 #define EPIC_POLL_TIMEOUT (-110)
 
 static bool afk_trace;
+/* Optional overall deadline for compact work (the J773g display budget). */
+static u64 afk_deadline;
+
+void afk_epic_set_deadline(u64 deadline)
+{
+    afk_deadline = deadline;
+}
+
+static bool afk_out_of_time(void)
+{
+    if (afk_deadline && timeout_expired(afk_deadline)) {
+        printf("AFK: display time budget used up\n");
+        return true;
+    }
+    return false;
+}
 
 #define tprintf(...)                                                                               \
     do {                                                                                           \
@@ -1105,7 +1121,7 @@ static int afk_compact_command(afk_epic_ep_t *epic, int channel, u16 sub_type, v
     size_t cap = rxsize ? *rxsize : 0;
     size_t wire = max(txsize, cap);
 
-    if (epic->broken || channel < 0 || channel > 0xffff || sub_type > 0xff)
+    if (epic->broken || channel < 0 || channel > 0xffff || sub_type > 0xff || afk_out_of_time())
         return -1;
 
     u8 tag = service ? service->cmd_tag++ : epic->cmd_tag++;
@@ -1182,7 +1198,8 @@ int afk_epic_wait_services(afk_epic_ep_t *epic, int expected, u32 timeout_us)
         for (u32 i = 0; i < epic->num_channels; i++)
             if (epic->services[i].enabled)
                 count++;
-        if (count >= expected || timeout_expired(deadline) || epic->broken)
+        if (count >= expected || timeout_expired(deadline) || epic->broken ||
+            (afk_deadline && timeout_expired(afk_deadline)))
             break;
         if (afk_epic_work(epic->afk, -1) < 0)
             break;
@@ -1407,6 +1424,9 @@ afk_epic_ep_t *afk_epic_start_ep_intf(afk_epic_t *afk, int endpoint,
         printf("EPIC: invalid or busy endpoint 0x%02x\n", endpoint);
         return NULL;
     }
+
+    if (afk->compact && afk_out_of_time())
+        return NULL;
 
     afk_epic_ep_t *epic = calloc(1, sizeof(afk_epic_ep_t));
     if (!epic)
