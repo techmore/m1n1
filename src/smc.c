@@ -30,6 +30,8 @@
 
 #define SMC_ENDPOINT 0x20
 
+#define SMC_TIMEOUT_US 1000000
+
 struct smc_dev {
     asc_dev_t *asc;
     rtkit_dev_t *rtkit;
@@ -61,9 +63,14 @@ static int smc_work(smc_dev_t *smc)
 {
     int ret;
     struct rtkit_message msg;
+    u64 deadline = timeout_calculate(SMC_TIMEOUT_US);
 
-    while ((ret = rtkit_recv(smc->rtkit, &msg)) == 0)
-        ;
+    while ((ret = rtkit_recv(smc->rtkit, &msg)) == 0) {
+        if (timeout_expired(deadline)) {
+            printf("SMC: timed out waiting for a message\n");
+            return -1;
+        }
+    }
 
     if (ret < 0) {
         printf("SMC: rtkit_recv failed!\n");
@@ -100,7 +107,8 @@ static int smc_cmd(smc_dev_t *smc, u64 message)
 
     smc_send(smc, message);
     while (smc->outstanding[id])
-        smc_work(smc);
+        if (smc_work(smc) < 0)
+            return -1;
 
     u64 result = smc->ret[id];
     u32 ret = FIELD_GET(SMC_RESULT_RESULT, result);

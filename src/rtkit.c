@@ -70,6 +70,9 @@
 #define RTKIT_MIN_VERSION 11
 #define RTKIT_MAX_VERSION 12
 
+/* Bound every power state wait, so an IOP that never answers cannot hang boot. */
+#define RTKIT_POWER_TIMEOUT_US 2000000
+
 #define IOVA_MASK GENMASK(35, 0)
 
 enum rtkit_power_state {
@@ -634,6 +637,7 @@ bool rtkit_boot(rtkit_dev_t *rtk)
     if (has_oslog && !rtkit_start_ep(rtk, RTKIT_EP_OSLOG))
         return false;
 
+    u64 deadline = timeout_calculate(RTKIT_POWER_TIMEOUT_US);
     while (rtk->iop_power != RTKIT_POWER_ON) {
         struct rtkit_message rtk_msg;
         int ret = rtkit_recv(rtk, &rtk_msg);
@@ -642,6 +646,10 @@ bool rtkit_boot(rtkit_dev_t *rtk)
                          rtk_msg.ep, rtk_msg.msg);
         else if (ret < 0)
             return false;
+        if (timeout_expired(deadline)) {
+            rtkit_printf("IOP did not power on\n");
+            return false;
+        }
     }
 
     /* this enables syslog */
@@ -672,10 +680,15 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
         return false;
     }
 
+    u64 deadline = timeout_calculate(RTKIT_POWER_TIMEOUT_US);
     while (rtk->ap_power != RTKIT_POWER_QUIESCED) {
         struct rtkit_message rtk_msg;
         int ret = rtkit_recv(rtk, &rtk_msg);
 
+        if (timeout_expired(deadline)) {
+            rtkit_printf("IOP did not acknowledge AP power state\n");
+            return false;
+        }
         if (ret > 0) {
             rtkit_printf("unexpected message to non-system endpoint 0x%02x during shutdown: %lx\n",
                          rtk_msg.ep, rtk_msg.msg);
@@ -692,10 +705,15 @@ static bool rtkit_switch_power_state(rtkit_dev_t *rtk, enum rtkit_power_state ta
         return false;
     }
 
+    deadline = timeout_calculate(RTKIT_POWER_TIMEOUT_US);
     while (rtk->iop_power != target) {
         struct rtkit_message rtk_msg;
         int ret = rtkit_recv(rtk, &rtk_msg);
 
+        if (timeout_expired(deadline)) {
+            rtkit_printf("IOP did not reach power state 0x%x\n", target);
+            return false;
+        }
         if (ret > 0) {
             rtkit_printf("unexpected message to non-system endpoint 0x%02x during shutdown: %lx\n",
                          rtk_msg.ep, rtk_msg.msg);
