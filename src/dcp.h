@@ -38,6 +38,9 @@ typedef struct {
 
 #define DCP_MAX_AUX_EP 12
 
+/* J773g: framebuffer area at the start of /vram; DCP buffers follow it */
+#define DCP_T8132_FB_MAX 0x400000
+
 struct dcp_iboot_if;
 
 typedef struct dcp_dev {
@@ -68,5 +71,6 @@ dcp_dev_t *dcp_init(const display_config_t *config);
 
 int dcp_shutdown(dcp_dev_t *dcp, bool sleep);
 bool dcp_left_active(void);
+int dcp_t8132_probe(const display_config_t *cfg);
 
 #endif

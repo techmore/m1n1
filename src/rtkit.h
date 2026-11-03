@@ -39,6 +39,7 @@ bool rtkit_send(rtkit_dev_t *rtk, const struct rtkit_message *msg);
 bool rtkit_map(rtkit_dev_t *rtk, void *phys, size_t sz, u64 *dva);
 bool rtkit_unmap(rtkit_dev_t *rtk, u64 dva, size_t sz);
 
+void rtkit_set_buffer_pool(rtkit_dev_t *rtk, void *phys, u64 dva, size_t size);
 bool rtkit_alloc_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr, size_t sz);
 bool rtkit_free_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr);
 

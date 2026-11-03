@@ -6,6 +6,7 @@
 #include "afk.h"
 #include "dcp.h"
 #include "dcp_iboot.h"
+#include "display.h"
 #include "firmware.h"
 #include "malloc.h"
 #include "pmgr.h"
@@ -13,6 +14,8 @@
 #include "smc.h"
 #include "string.h"
 #include "utils.h"
+#include "vsprintf.h"
+#include "xnuboot.h"
 
 #include "dcp/aux_ep.h"
 #include "dcp/dptx_phy.h"
@@ -54,6 +57,18 @@ static void dcp_release(dcp_dev_t *dcp, bool stop_iop)
     if (!stopped) {
         printf("dcp: DCP did not stop; keeping its DART tables and buffers\n");
         dcp_active_after_failure = true;
+        return;
+    }
+
+    if (dcp->compact) {
+        /* J773g: DARTs were only read; buffers live in reserved /vram */
+        if (dcp->rtkit)
+            rtkit_free(dcp->rtkit);
+        if (dcp->asc)
+            asc_free(dcp->asc);
+        dart_free_readonly(dcp->dart_disp);
+        dart_free_readonly(dcp->dart_dcp);
+        free(dcp);
         return;
     }
 
@@ -133,16 +148,18 @@ static int dcp_t8132_hdmi_init(dcp_dev_t *dcp, const display_config_t *cfg)
     bool minimal = dcp_options & DCP_OPT_MINIMAL;
     u32 stage = DCP_OPT_STAGE(dcp_options);
 
-    if (stage == 1) {
-        printf("dcp: stage 1 (RTKit up) reached, stopping\n");
-        return -1;
-    }
-
     if (!(dcp_options & DCP_OPT_NO_SMC))
         dcp_t8132_hdmi_power(cfg);
 
-    if (stage == 2) {
-        printf("dcp: stage 2 (HDMI power) reached, stopping\n");
+    /* the only PMGR write in this path, and only if iBoot left the PHY off */
+    if (!pmgr_adt_power_is_active(cfg->dptx_phy)) {
+        printf("dcp: powering on %s\n", cfg->dptx_phy);
+        pmgr_adt_power_enable(cfg->dptx_phy);
+        mdelay(25);
+    }
+
+    if (stage == 3) {
+        printf("dcp: stage 3 (HDMI power) reached, stopping\n");
         return -1;
     }
 
@@ -201,8 +218,8 @@ static int dcp_t8132_hdmi_init(dcp_dev_t *dcp, const display_config_t *cfg)
         return -1;
     }
 
-    if (stage == 3) {
-        printf("dcp: stage 3 (endpoints up) reached, stopping\n");
+    if (stage == 4) {
+        printf("dcp: stage 4 (endpoints up) reached, stopping\n");
         return -1;
     }
 
@@ -353,22 +370,309 @@ static int dcp_create_firmware_mappings(const display_config_t *cfg, dcp_dev_t *
     return created;
 }
 
+/* The last 64 KiB of /vram hold the probe record; the buffer pool ends there. */
+#define DCP_T8132_RECORD_SIZE 0x10000
+
+/* Read-only: are the DCP firmware segments mapped in its DART, as iBoot left them? */
+static int dcp_t8132_check_firmware_mappings(const display_config_t *cfg, dcp_dev_t *dcp,
+                                             int *n_segments)
+{
+    int node = adt_first_child_offset(adt, adt_path_offset(adt, cfg->dcp));
+    if (node < 0)
+        return -1;
+
+    u64 mask = 0;
+    if (ADT_GETPROP(adt, node, "asc-dram-mask", &mask) < 0)
+        mask = 0;
+
+    u32 len;
+    const struct adt_segment_ranges *seg = adt_getprop(adt, node, "segment-ranges", &len);
+    if (!seg)
+        return -1;
+
+    int missing = 0;
+    *n_segments = len / sizeof(*seg);
+    for (int i = 0; i < *n_segments; i++) {
+        u64 iova = seg[i].remap & ~mask;
+        void *pa = dart_translate_silent(dcp->dart_dcp, iova);
+        printf("dcp: segment %d: dva 0x%lx -> %p (ADT phys 0x%lx)%s\n", i, iova, pa,
+               seg[i].phys, pa ? "" : " NOT MAPPED");
+        if (!pa)
+            missing++;
+    }
+    return missing;
+}
+
+/*
+ * Buffers for the DCP come from /vram above the framebuffer area: iBoot maps
+ * /vram for the DCP, and it is reserved memory that the OS never reuses, so no
+ * DART page table needs to be written and nothing is freed at hand-off.
+ */
+static int dcp_t8132_find_pool(dcp_dev_t *dcp, void **phys, u64 *dva, size_t *size)
+{
+    u64 pa, vsize;
+
+    if (display_get_vram(&pa, &vsize))
+        return -1;
+
+    u64 start = pa + DCP_T8132_FB_MAX;
+    u64 end = pa + vsize - DCP_T8132_RECORD_SIZE;
+    if (end <= start + SZ_1M) {
+        printf("dcp: /vram (0x%lx bytes) too small for a buffer pool\n", vsize);
+        return -1;
+    }
+
+    u64 d = dart_search(dcp->dart_dcp, (void *)start);
+    if (DART_IS_ERR(d)) {
+        printf("dcp: /vram+0x%x is not mapped for the DCP\n", DCP_T8132_FB_MAX);
+        return -1;
+    }
+
+    u64 len = 0;
+    while (start + len < end && dart_translate_silent(dcp->dart_dcp, d + len) == (void *)(start + len))
+        len += SZ_16K;
+
+    printf("dcp: buffer pool /vram+0x%x: 0x%lx bytes at DCP dva 0x%lx\n", DCP_T8132_FB_MAX, len, d);
+    if (len < SZ_1M)
+        return -1;
+
+    *phys = (void *)start;
+    *dva = d;
+    *size = len;
+    return 0;
+}
+
+static bool dcp_t8132_firmware_ok(void)
+{
+    /* the compact protocol is known for 26.6 DCP firmware only */
+    if (os_firmware.version != V26_6 && os_firmware.version != V26_6_2) {
+        printf("dcp: T8132 HDMI needs 26.6 OS firmware (have %s)\n", os_firmware.string);
+        return false;
+    }
+    return true;
+}
+
+static u32 dcp_t8132_sid(const display_config_t *cfg)
+{
+    u32 sid = 0;
+    int node = adt_first_child_offset(adt, adt_path_offset(adt, cfg->dcp_dart));
+    if (node < 0 || ADT_GETPROP(adt, node, "reg", &sid) < 0)
+        return 0xffffffff;
+    return sid;
+}
+
+/*
+ * J773g bring-up without writing any iBoot-owned DART: the DARTs are adopted
+ * read-only, the firmware must already be mapped, RTKit/AFK buffers come from
+ * /vram, and the framebuffer is the iBoot-mapped /vram. Stages 1 and 2 make no
+ * PMGR writes either.
+ */
+static dcp_dev_t *dcp_init_t8132(const display_config_t *cfg)
+{
+    u32 stage = DCP_OPT_STAGE(dcp_options);
+    int n_segments = 0;
+    void *pool;
+    u64 pool_dva;
+    size_t pool_size;
+
+    if (dcp_active_after_failure || !dcp_t8132_precheck(cfg) || !dcp_t8132_firmware_ok())
+        return NULL;
+
+    afk_epic_set_trace(dcp_options & DCP_OPT_TRACE);
+    strncpy(dcp_pmgr_dev, cfg->pmgr_dev, sizeof(dcp_pmgr_dev));
+    dcp_die = cfg->die;
+
+    if (!pmgr_adt_power_is_active(cfg->dcp)) {
+        printf("dcp: DCP is not powered, iBoot did not leave it running; skipping\n");
+        return NULL;
+    }
+
+    u32 sid = dcp_t8132_sid(cfg);
+    if (sid == 0xffffffff) {
+        printf("dcp: failed to read dart stream ID!\n");
+        return NULL;
+    }
+
+    dcp_dev_t *dcp = calloc(1, sizeof(dcp_dev_t));
+    if (!dcp)
+        return NULL;
+    dcp->compact = true;
+
+    dcp->dart_dcp = dart_init_adt_readonly(cfg->dcp_dart, 0, sid);
+    if (!dcp->dart_dcp)
+        goto out_free;
+    dcp->dart_disp = dart_init_adt_readonly(cfg->disp_dart, 0, 0);
+    if (!dcp->dart_disp)
+        goto out_dart_dcp;
+
+    if (dcp_t8132_check_firmware_mappings(cfg, dcp, &n_segments) != 0 || !n_segments) {
+        printf("dcp: DCP firmware is not mapped as iBoot leaves it running; skipping\n");
+        goto out_darts;
+    }
+    if (dcp_t8132_find_pool(dcp, &pool, &pool_dva, &pool_size) < 0)
+        goto out_darts;
+
+    if (stage == 1) {
+        printf("dcp: stage 1 (state checked, nothing written) reached, stopping\n");
+        goto out_darts;
+    }
+
+    dcp->asc = asc_init(cfg->dcp);
+    if (!dcp->asc)
+        goto out_darts;
+
+    dcp->rtkit = rtkit_init("dcp", dcp->asc, dcp->dart_dcp, NULL, NULL, false);
+    if (!dcp->rtkit)
+        goto out_asc;
+    rtkit_set_buffer_pool(dcp->rtkit, pool, pool_dva, pool_size);
+
+    if (!rtkit_boot(dcp->rtkit)) {
+        printf("dcp: failed to boot RTKit\n");
+        goto out_rtkit;
+    }
+
+    if (stage == 2) {
+        printf("dcp: stage 2 (RTKit handshake) reached, stopping\n");
+        goto out_rtkit;
+    }
+
+    dcp->afk = afk_epic_init(dcp->rtkit);
+    if (!dcp->afk)
+        goto out_rtkit;
+    afk_epic_set_compact(dcp->afk, true);
+
+    if (dcp_t8132_hdmi_init(dcp, cfg) < 0)
+        goto out_rtkit;
+
+    return dcp;
+
+out_rtkit:
+    /* the IOP was contacted: stop it; memory is kept if it does not stop */
+    dcp_release(dcp, true);
+    return NULL;
+out_asc:
+    asc_free(dcp->asc);
+out_darts:
+    dart_free_readonly(dcp->dart_disp);
+out_dart_dcp:
+    dart_free_readonly(dcp->dart_dcp);
+out_free:
+    free(dcp);
+    return NULL;
+}
+
+/* Stage A: a read-only look at the J773g display state, kept in /vram too. */
+static char probe_record[4096];
+static size_t probe_len;
+
+static void plog(const char *fmt, ...)
+{
+    va_list ap;
+    char line[192];
+
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    printf("%s", line);
+    size_t n = strlen(line);
+    if (probe_len + n < sizeof(probe_record) - 1) {
+        memcpy(probe_record + probe_len, line, n);
+        probe_len += n;
+    }
+}
+
+int dcp_t8132_probe(const display_config_t *cfg)
+{
+    u64 vram_pa = 0, vram_size = 0;
+    int n_segments = 0;
+
+    probe_len = 0;
+    plog("M1N1-J773G-PROBE v1 (read-only)\n");
+    plog("os firmware %s, ok=%d\n", os_firmware.string, dcp_t8132_firmware_ok());
+    plog("boot fb 0x%lx %lux%lu stride %lu depth %lu\n", cur_boot_args.video.base,
+         cur_boot_args.video.width, cur_boot_args.video.height, cur_boot_args.video.stride,
+         cur_boot_args.video.depth);
+
+    bool pre = dcp_t8132_precheck(cfg);
+    plog("precheck %s\n", pre ? "ok" : "FAILED");
+
+    bool dcp_on = pmgr_adt_power_is_active(cfg->dcp);
+    bool phy_on = pmgr_adt_power_is_active(cfg->dptx_phy);
+    plog("pmgr: dcp %s, dptx-phy %s\n", dcp_on ? "active" : "NOT active",
+         phy_on ? "active" : "NOT active");
+
+    if (display_get_vram(&vram_pa, &vram_size) == 0)
+        plog("vram 0x%lx size 0x%lx\n", vram_pa, vram_size);
+    else
+        plog("vram lookup FAILED\n");
+
+    u32 sid = dcp_t8132_sid(cfg);
+    plog("dart-dcp sid %u\n", sid);
+
+    dcp_dev_t probe = {0};
+    if (pre && sid != 0xffffffff) {
+        probe.dart_dcp = dart_init_adt_readonly(cfg->dcp_dart, 0, sid);
+        probe.dart_disp = dart_init_adt_readonly(cfg->disp_dart, 0, 0);
+    }
+    plog("darts adopted read-only: dcp %d disp %d\n", !!probe.dart_dcp, !!probe.dart_disp);
+
+    if (probe.dart_dcp) {
+        int missing = dcp_t8132_check_firmware_mappings(cfg, &probe, &n_segments);
+        plog("firmware segments %d, unmapped %d\n", n_segments, missing);
+    }
+    if (vram_pa && probe.dart_disp) {
+        u64 d = dart_search(probe.dart_disp, (void *)vram_pa);
+        plog("vram in dart-disp0: %s 0x%lx\n", DART_IS_ERR(d) ? "NO" : "dva", d);
+    }
+    if (vram_pa && probe.dart_dcp) {
+        u64 d = dart_search(probe.dart_dcp, (void *)vram_pa);
+        plog("vram in dart-dcp: %s 0x%lx\n", DART_IS_ERR(d) ? "NO" : "dva", d);
+        void *pool;
+        u64 pool_dva;
+        size_t pool_size = 0;
+        int ret = dcp_t8132_find_pool(&probe, &pool, &pool_dva, &pool_size);
+        plog("buffer pool: %s, 0x%lx bytes\n", ret ? "NOT usable" : "usable", pool_size);
+    }
+
+    if (dcp_on) {
+        asc_dev_t *asc = asc_init(cfg->dcp);
+        if (asc) {
+            plog("dcp cpu running: %d\n", asc_cpu_running(asc));
+            asc_free(asc);
+        }
+    } else {
+        plog("dcp cpu: not read (not powered)\n");
+    }
+
+    if (probe.dart_disp)
+        dart_free_readonly(probe.dart_disp);
+    if (probe.dart_dcp)
+        dart_free_readonly(probe.dart_dcp);
+
+    plog("end of probe\n");
+
+    /* keep a copy at the end of /vram (reserved memory, readable from Linux) */
+    if (vram_pa && vram_size > DCP_T8132_RECORD_SIZE + cur_boot_args.video.stride *
+                                                           cur_boot_args.video.height) {
+        void *rec = (void *)(vram_pa + vram_size - DCP_T8132_RECORD_SIZE);
+        memset(rec, 0, sizeof(probe_record) + 64);
+        memcpy(rec, probe_record, probe_len);
+        dma_wmb();
+        printf("display: probe record at 0x%lx\n", (u64)rec);
+    }
+
+    return 0;
+}
+
 dcp_dev_t *dcp_init(const display_config_t *cfg)
 {
     u32 sid;
 
+    if (cfg && cfg->compact)
+        return dcp_init_t8132(cfg);
+
     if (cfg && cfg->dptx_phy[0]) {
-        if (cfg->compact) {
-            if (dcp_active_after_failure || !dcp_t8132_precheck(cfg))
-                return NULL;
-            /* the compact protocol is known for 26.6 DCP firmware only */
-            if (os_firmware.version != V26_6 && os_firmware.version != V26_6_2) {
-                printf("dcp: T8132 HDMI needs 26.6 OS firmware (have %s)\n",
-                       os_firmware.string);
-                return NULL;
-            }
-            afk_epic_set_trace(dcp_options & DCP_OPT_TRACE);
-        } else if (os_firmware.version != V13_5) {
+        if (os_firmware.version != V13_5) {
             printf("dcp: dtpx-port is only supported with V13_5 OS firmware.\n");
             return NULL;
         }
@@ -419,12 +723,6 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
         goto out_iovad;
     }
     if (ret > 0) {
-        /* A 26.6 DCP left unmapped by iBoot would need a cold restart of its
-         * pre-loaded image, which is how stock m1n1 crashed it; do not try. */
-        if (cfg && cfg->compact) {
-            printf("dcp: firmware was not mapped by iBoot, not resetting a 26.6 DCP\n");
-            goto out_iovad;
-        }
         pmgr_reset(dcp_die, dcp_pmgr_dev);
     }
 
@@ -452,13 +750,8 @@ dcp_dev_t *dcp_init(const display_config_t *cfg)
         goto out_rtkit;
     }
 
-    if (cfg && cfg->compact) {
-        dcp->compact = true;
-        afk_epic_set_compact(dcp->afk, true);
-    }
-
     if (cfg && cfg->dptx_phy[0]) {
-        int ret = cfg->compact ? dcp_t8132_hdmi_init(dcp, cfg) : dcp_hdmi_dptx_init(dcp, cfg);
+        int ret = dcp_hdmi_dptx_init(dcp, cfg);
         if (ret < 0)
             goto out_afk;
     }

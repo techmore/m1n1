@@ -18,6 +18,8 @@ enum dart_type_t {
 
 dart_dev_t *dart_init(uintptr_t base, u8 device, bool keep_pts, enum dart_type_t type);
 dart_dev_t *dart_init_adt(const char *path, int instance, int device, bool keep_pts);
+dart_dev_t *dart_init_adt_readonly(const char *path, int instance, int device);
+void dart_free_readonly(dart_dev_t *dart);
 void dart_lock_adt(const char *path, int instance);
 dart_dev_t *dart_init_fdt(void *dt, u32 phandle, int device, bool keep_pts);
 int dart_setup_pt_region(dart_dev_t *dart, const char *path, int device, u64 vm_base);

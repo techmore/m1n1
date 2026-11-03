@@ -452,6 +452,21 @@ static void mmu_remap_ranges(void)
     }
 }
 
+/*
+ * Map memory that a real-time agent (display, DCP, their DARTs) also uses as
+ * Normal-NC: cacheable CPU accesses leave AMCC directory state behind that
+ * makes the AMCC fault when the agent later accesses the memory (see the
+ * /vram note in mmu_add_default_mappings()).
+ */
+void mmu_map_nc(u64 addr, size_t size)
+{
+    addr = ALIGN_DOWN(addr, SZ_16K);
+    size = ALIGN_UP(size, SZ_16K);
+    printf("MMU: Adding Normal-NC mapping at 0x%lx (0x%zx)\n", addr, size);
+    dc_civac_range((void *)addr, size);
+    mmu_add_mapping(addr, addr, size, MAIR_IDX_NORMAL_NC, PERM_RW_EL0);
+}
+
 void mmu_map_framebuffer(u64 addr, size_t size)
 {
     printf("MMU: Adding Normal-NC mapping at 0x%lx (0x%zx) for framebuffer\n", addr, size);

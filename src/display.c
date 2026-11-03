@@ -322,6 +322,9 @@ int display_start_dcp(void)
     } else {
         fb_size = size;
     }
+    /* J773g: the rest of /vram holds the DCP's buffers */
+    if (dcp->compact && fb_size > DCP_T8132_FB_MAX)
+        fb_size = DCP_T8132_FB_MAX;
 
     // Find the framebuffer DVA
     fb_dva = dart_search(dcp->dart_disp, (void *)cur_boot_args.video.base);
@@ -470,6 +473,10 @@ int display_configure(const char *config)
         return 0;
     }
 
+    /* stage A: read-only probe, then boot on without display */
+    if (config && !strncmp(config, "probe", 5))
+        return dcp_t8132_probe(cfg);
+
     afk_epic_set_deadline(timeout_calculate(45 * 1000000));
     int ret = display_configure_dcp(config);
     afk_epic_set_deadline(0);
@@ -508,8 +515,8 @@ static int display_configure_dcp(const char *config)
             return ret;
     }
 
-    if (dcp->compact && stage == 4) {
-        printf("display: stage 4 (DPTX connected) reached, stopping\n");
+    if (dcp->compact && stage == 5) {
+        printf("display: stage 5 (DPTX connected) reached, stopping\n");
         return -1;
     }
 
@@ -567,8 +574,8 @@ static int display_configure_dcp(const char *config)
 
     printf("display: connected:%d timing_cnt:%d color_cnt:%d\n", hpd, timing_cnt, color_cnt);
 
-    if (dcp->compact && stage == 5) {
-        printf("display: stage 5 (display status) reached, stopping\n");
+    if (dcp->compact && stage == 6) {
+        printf("display: stage 6 (display status) reached, stopping\n");
         return -1;
     }
 

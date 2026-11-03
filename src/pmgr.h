@@ -20,6 +20,7 @@ int pmgr_power_enable(u32 id);
 int pmgr_power_disable(u32 id);
 
 int pmgr_adt_power_enable(const char *path);
+bool pmgr_adt_power_is_active(const char *path);
 int pmgr_adt_power_disable(const char *path);
 int pmgr_adt_power_enable_index(const char *path, u32 index);
 int pmgr_adt_power_disable_index(const char *path, u32 index);

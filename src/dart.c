@@ -119,7 +119,26 @@ struct dart_dev {
     u64 vm_base;
 
     u64 *l1[DART_MAX_TTBR_COUNT];
+
+    /* read-only adoption: page tables may only be read inside these ranges */
+    int ro_ranges;
+    u64 ro_lo[4], ro_hi[4];
+    bool ro_warned;
 };
+
+static bool dart_table_ok(dart_dev_t *dart, const void *tbl)
+{
+    if (!dart->ro_ranges)
+        return true;
+    for (int i = 0; i < dart->ro_ranges; i++)
+        if ((u64)tbl >= dart->ro_lo[i] && (u64)tbl + SZ_16K <= dart->ro_hi[i])
+            return true;
+    if (!dart->ro_warned)
+        printf("dart[%lx %u]: table %p outside its page table region, not read\n", dart->regs,
+               dart->device, tbl);
+    dart->ro_warned = true;
+    return false;
+}
 
 static void dart_t8020_tlb_invalidate(dart_dev_t *dart)
 {
@@ -339,6 +358,111 @@ dart_dev_t *dart_init_adt(const char *path, int instance, int device, bool keep_
         dart->vm_base &= (1LLU << 36) - 1;
 
     return dart;
+}
+
+/*
+ * Adopt a DART that firmware set up, for lookups only: no DART register and no
+ * page table is written (no stream enable, no TTBR or TCR change, no TLB
+ * flush). Only dart_translate*() and dart_search() may be used on the result;
+ * release it with dart_free_readonly(), never dart_shutdown().
+ */
+dart_dev_t *dart_init_adt_readonly(const char *path, int instance, int device)
+{
+    int dart_path[8];
+    int node = adt_path_offset_trace(adt, path, dart_path);
+    if (node < 0) {
+        printf("dart: Error getting DART node %s\n", path);
+        return NULL;
+    }
+
+    u64 base;
+    if (adt_get_reg(adt, dart_path, "reg", instance, &base, NULL) < 0) {
+        printf("dart: Error getting DART %s base address.\n", path);
+        return NULL;
+    }
+
+    if (!adt_is_compatible(adt, node, "dart,t8110")) {
+        printf("dart: %s: read-only adoption supports t8110 DARTs only\n", path);
+        return NULL;
+    }
+
+    dart_dev_t *dart = calloc(1, sizeof(*dart));
+    if (!dart)
+        return NULL;
+
+    dart->regs = base;
+    dart->device = device;
+    dart->type = DART_T8110;
+    dart->params = &dart_t8110;
+    dart->keep = true;
+
+    if (device >= dart->params->sid_count) {
+        printf("dart: device %d is too big for this DART type\n", device);
+        free(dart);
+        return NULL;
+    }
+
+    dart->locked = !!(read32(dart->regs + DART_T8110_PROTECT) & DART_T8110_PROTECT_TTBR_TCR);
+
+    /* iBoot keeps this stream's tables in pt-region-<sid>; read them only
+     * there, and only through a Normal-NC mapping (real-time DART memory) */
+    char prop_name[24];
+    snprintf(prop_name, sizeof(prop_name), "pt-region-%d", device);
+    const struct adt_property *pt_region = adt_get_property(adt, node, prop_name);
+    if (!pt_region || pt_region->size != 16) {
+        printf("dart: %s has no %s, not adopting it\n", path, prop_name);
+        free(dart);
+        return NULL;
+    }
+    u64 region[2];
+    memcpy(region, pt_region->value, sizeof(region));
+    if (region[1] <= region[0] || region[1] - region[0] > SZ_1M) {
+        printf("dart: %s %s looks wrong, not adopting it\n", path, prop_name);
+        free(dart);
+        return NULL;
+    }
+    mmu_map_nc(region[0], region[1] - region[0]);
+    dart->ro_lo[0] = region[0];
+    dart->ro_hi[0] = region[1];
+    dart->ro_ranges = 1;
+
+    int valid = 0;
+    for (int i = 0; i < dart->params->ttbr_count; i++) {
+        u32 ttbr = read32(DART_TTBR(dart, i));
+        if (ttbr & dart->params->ttbr_valid) {
+            dart->l1[i] =
+                (u64 *)(FIELD_GET(dart->params->ttbr_addr, ttbr) << dart->params->ttbr_shift);
+            valid++;
+        }
+    }
+
+    printf("dart: %s sid %d adopted read-only: %s, TCR 0x%x, %d valid TTBR\n", path, device,
+           dart->locked ? "locked" : "unlocked", read32(DART_TCR(dart)), valid);
+
+    if (!valid) {
+        free(dart);
+        return NULL;
+    }
+
+    u32 len;
+    const void *prop = adt_getprop(adt, node, "vm-base", &len);
+    if (prop && len == sizeof(u64)) {
+        memcpy(&dart->vm_base, prop, sizeof(u64));
+    } else if (prop && len == sizeof(u32)) {
+        u32 tmp;
+        memcpy(&tmp, prop, sizeof(tmp));
+        dart->vm_base = tmp;
+    }
+    if (dart->locked)
+        dart->vm_base &= (1LLU << 36) - 1;
+
+    return dart;
+}
+
+void dart_free_readonly(dart_dev_t *dart)
+{
+    /* nothing was allocated for or written to the DART itself */
+    free(dart);
 }
 
 void dart_lock_adt(const char *path, int instance)
@@ -640,6 +764,8 @@ static void *dart_translate_internal(dart_dev_t *dart, uintptr_t iova, int silen
         printf("dart[%lx %u]: l1[%u] is not set\n", dart->regs, dart->device, ttbr);
         return NULL;
     }
+    if (!dart_table_ok(dart, dart->l1[ttbr]))
+        return NULL;
 
     if (!(dart->l1[ttbr][l1_index] & DART_PTE_VALID)) {
         if (!silent)
@@ -651,6 +777,8 @@ static void *dart_translate_internal(dart_dev_t *dart, uintptr_t iova, int silen
     u32 l2_index = (iova >> 14) & 0x7ff;
     u64 *l2 = (u64 *)(FIELD_GET(dart->params->offset_mask, dart->l1[ttbr][l1_index])
                       << DART_PTE_OFFSET_SHIFT);
+    if (!dart_table_ok(dart, l2))
+        return NULL;
 
     if (!(l2[l2_index] & DART_PTE_VALID)) {
         if (!silent)
@@ -679,7 +807,7 @@ void *dart_translate_silent(dart_dev_t *dart, uintptr_t iova)
 u64 dart_search(dart_dev_t *dart, void *paddr)
 {
     for (int ttbr = 0; ttbr < dart->params->ttbr_count; ++ttbr) {
-        if (!dart->l1[ttbr])
+        if (!dart->l1[ttbr] || !dart_table_ok(dart, dart->l1[ttbr]))
             continue;
         for (u32 l1_index = 0; l1_index < 0x7ff; l1_index++) {
             if (!(dart->l1[ttbr][l1_index] & DART_PTE_VALID))
@@ -687,6 +815,8 @@ u64 dart_search(dart_dev_t *dart, void *paddr)
 
             u64 *l2 = (u64 *)(FIELD_GET(dart->params->offset_mask, dart->l1[ttbr][l1_index])
                               << DART_PTE_OFFSET_SHIFT);
+            if (!dart_table_ok(dart, l2))
+                continue;
             for (u32 l2_index = 0; l2_index < 0x7ff; l2_index++) {
                 if (!(l2[l2_index] & DART_PTE_VALID))
                     continue;

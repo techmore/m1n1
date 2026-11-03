@@ -265,6 +265,48 @@ static int pmgr_adt_device_set_mode(const char *path, u32 index, u8 target_mode,
     return ret;
 }
 
+/*
+ * Read-only: print the power state of a node's clock-gates and tell whether
+ * all of them are active. No PMGR register is written.
+ */
+bool pmgr_adt_power_is_active(const char *path)
+{
+    const u32 *devices;
+    u32 n_devices;
+    bool active = true;
+
+    if (!pmgr_initialized || pmgr_adt_find_devices(path, &devices, &n_devices) < 0)
+        return false;
+
+    for (u32 i = 0; i < n_devices; ++i) {
+        u16 id = FIELD_GET(PMGR_DEVICE_ID, devices[i]);
+        u8 die = FIELD_GET(PMGR_DIE_ID, devices[i]);
+        const struct pmgr_device *device;
+
+        if (pmgr_find_device(id, &device)) {
+            printf("pmgr: %s: device %u not found\n", path, id);
+            active = false;
+            continue;
+        }
+        if (device->flags & PMGR_FLAG_VIRTUAL) {
+            printf("pmgr: %s: device %u is virtual\n", path, id);
+            continue;
+        }
+        uintptr_t addr = pmgr_device_get_addr(die, device);
+        if (!addr) {
+            active = false;
+            continue;
+        }
+        u32 reg = read32(addr);
+        printf("pmgr: %s: device %u ps 0x%08x (actual %u)\n", path, id, reg,
+               (u32)FIELD_GET(PMGR_PS_ACTUAL, reg));
+        if (FIELD_GET(PMGR_PS_ACTUAL, reg) != PMGR_PS_ACTIVE)
+            active = false;
+    }
+
+    return active;
+}
+
 int pmgr_adt_power_enable(const char *path)
 {
     int ret = pmgr_adt_devices_set_mode(path, PMGR_PS_ACTIVE, true);

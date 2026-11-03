@@ -8,6 +8,7 @@
 #include "dart.h"
 #include "iova.h"
 #include "malloc.h"
+#include "memory.h"
 #include "sart.h"
 #include "string.h"
 #include "types.h"
@@ -96,6 +97,11 @@ struct rtkit_dev {
 
     enum rtkit_power_state iop_power;
     enum rtkit_power_state ap_power;
+
+    /* optional: buffers come from memory the IOP can already reach */
+    void *pool_phys;
+    u64 pool_dva;
+    size_t pool_size, pool_used;
 
     struct rtkit_buffer syslog_bfr;
     struct rtkit_buffer crashlog_bfr;
@@ -244,8 +250,36 @@ bool rtkit_unmap(rtkit_dev_t *rtk, u64 dva, size_t sz)
     }
 }
 
+/*
+ * Hand out buffers from memory that is already mapped for the IOP, so that no
+ * IOMMU page table has to be written. Such buffers are never freed.
+ */
+void rtkit_set_buffer_pool(rtkit_dev_t *rtk, void *phys, u64 dva, size_t size)
+{
+    rtk->pool_phys = phys;
+    rtk->pool_dva = dva;
+    rtk->pool_size = size;
+    rtk->pool_used = 0;
+}
+
 bool rtkit_alloc_buffer(rtkit_dev_t *rtk, struct rtkit_buffer *bfr, size_t sz)
 {
+    if (rtk->pool_size) {
+        sz = ALIGN_UP(sz, SZ_16K);
+        if (sz > rtk->pool_size - rtk->pool_used) {
+            rtkit_printf("buffer pool exhausted (0x%zx of 0x%zx used, need 0x%zx)\n",
+                         rtk->pool_used, rtk->pool_size, sz);
+            bfr->bfr = NULL;
+            return false;
+        }
+        bfr->bfr = rtk->pool_phys + rtk->pool_used;
+        bfr->dva = (rtk->pool_dva + rtk->pool_used) | rtk->dva_base;
+        bfr->sz = sz;
+        memset(bfr->bfr, 0, sz);
+        rtk->pool_used += sz;
+        return true;
+    }
+
     bfr->bfr = memalign(SZ_16K, sz);
     if (!bfr->bfr) {
         rtkit_printf("unable to allocate %zu buffer\n", sz);
@@ -304,6 +338,10 @@ static bool rtkit_handle_buffer_request(rtkit_dev_t *rtk, struct rtkit_message *
                          addr);
             return false;
         } else {
+            /* With a buffer pool (J773g DCP) this is real-time IOP memory:
+             * only touch it through a Normal-NC mapping. */
+            if (rtk->pool_size)
+                mmu_map_nc((u64)bfr->bfr, sz);
             rtkit_printf("pre-allocated buffer (ep 0x%x, dva 0x%lx, phys %p)\n", msg->ep, addr,
                          bfr->bfr);
         }
