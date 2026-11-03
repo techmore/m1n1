@@ -809,7 +809,7 @@ u64 dart_search(dart_dev_t *dart, void *paddr)
     for (int ttbr = 0; ttbr < dart->params->ttbr_count; ++ttbr) {
         if (!dart->l1[ttbr] || !dart_table_ok(dart, dart->l1[ttbr]))
             continue;
-        for (u32 l1_index = 0; l1_index < 0x7ff; l1_index++) {
+        for (u32 l1_index = 0; l1_index < 0x800; l1_index++) {
             if (!(dart->l1[ttbr][l1_index] & DART_PTE_VALID))
                 continue;
 
@@ -817,7 +817,7 @@ u64 dart_search(dart_dev_t *dart, void *paddr)
                               << DART_PTE_OFFSET_SHIFT);
             if (!dart_table_ok(dart, l2))
                 continue;
-            for (u32 l2_index = 0; l2_index < 0x7ff; l2_index++) {
+            for (u32 l2_index = 0; l2_index < 0x800; l2_index++) {
                 if (!(l2[l2_index] & DART_PTE_VALID))
                     continue;
                 u64 *dst = (u64 *)(FIELD_GET(dart->params->offset_mask, l2[l2_index])
