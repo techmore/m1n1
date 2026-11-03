@@ -624,9 +624,18 @@ static int dcp_t8132_inventory(dart_dev_t *dart, const char *name, struct dart_l
  * A window for a 1080p framebuffer that persists past m1n1: the same IOVA,
  * free on both DARTs, inside L2 tables that live in the reserved pt-regions.
  */
-static void dcp_t8132_common_window(dcp_dev_t *probe, int na, int nb)
+struct dcp_t8132_window {
+    u64 iova;  /* first page, never IOVA 0 */
+    int pages; /* free pages from iova on, in both DARTs */
+};
+
+static void dcp_t8132_common_window(dcp_dev_t *probe, int na, int nb, int need,
+                                    struct dcp_t8132_window *win)
 {
     int found = 0, both_unused = 0;
+
+    win->iova = 0;
+    win->pages = 0;
 
     for (int i = 0; i < na; i++) {
         struct dart_l2_info *a = &probe_inv[0][i];
@@ -651,6 +660,13 @@ static void dcp_t8132_common_window(dcp_dev_t *probe, int na, int nb)
             plog("common t%u l1[%u]: %d free pages at iova 0x%lx%s\n", a->ttbr, a->l1, best, iova,
                  best >= DCP_T8132_FB_1080P_PAGES ? " (fits 1080p)" : "");
             found++;
+            /* keep IOVA 0 unused: a zero DMA address reads as "no buffer" */
+            int start = best_start ? best_start : 1;
+            int len = best - (start - best_start);
+            if (need && len >= need && !win->pages) {
+                win->iova = ((u64)a->ttbr << 36) | ((u64)a->l1 << 25) | ((u64)start << 14);
+                win->pages = len;
+            }
         }
     }
     if (!found)
@@ -670,13 +686,75 @@ static void dcp_t8132_common_window(dcp_dev_t *probe, int na, int nb)
          DCP_T8132_FB_1080P_PAGES);
 }
 
-int dcp_t8132_probe(const display_config_t *cfg)
+/*
+ * probe,map: map all of /vram at one IOVA in both display DARTs, writing only
+ * leaf PTEs into the L2 tables iBoot already keeps in the reserved
+ * pt-regions. The DCP stays off. kboot then finds /vram mapped in both DARTs
+ * and gives Linux matching iommu-addresses, so the IOVAs stay reserved.
+ */
+static void dcp_t8132_map_vram(dcp_dev_t *probe, const struct dcp_t8132_window *win, u64 pa,
+                               u64 size)
+{
+    u64 iova = win->iova;
+
+    if (!win->pages || !pa || !size || size % SZ_16K) {
+        plog("map: no window for /vram (%d pages free, need %lu), nothing written\n",
+             win->pages, size / SZ_16K);
+        return;
+    }
+    plog("map: /vram 0x%lx size 0x%lx (%lu pages) -> iova 0x%lx in both DARTs\n", pa, size,
+         size / SZ_16K, iova);
+
+    /* what iBoot's own leaves look like next to the window, for comparison */
+    for (u64 k = 0; k < 0x800; k++) {
+        u64 v = dart_ro_pte(probe->dart_dcp, (iova & ~0x1ffffffUL) | (k << 14));
+        if (v) {
+            plog("map: dart-dcp sample leaf [%lu] 0x%lx\n", k, v);
+            break;
+        }
+    }
+    for (u64 k = 0; k < 0x800; k++) {
+        u64 v = dart_ro_pte(probe->dart_disp, (iova & ~0x1ffffffUL) | (k << 14));
+        if (v) {
+            plog("map: dart-disp0 sample leaf [%lu] 0x%lx\n", k, v);
+            break;
+        }
+    }
+
+    if (dart_ro_map_existing(probe->dart_disp, iova, pa, size)) {
+        plog("map: dart-disp0 refused, nothing written\n");
+        return;
+    }
+    if (dcp_faulted())
+        return;
+    if (dart_ro_map_existing(probe->dart_dcp, iova, pa, size)) {
+        plog("map: dart-dcp refused, undoing dart-disp0\n");
+        dart_ro_unmap_existing(probe->dart_disp, iova, size);
+        return;
+    }
+    if (dcp_faulted())
+        return;
+
+    plog("map: written; first leaf dcp 0x%lx disp0 0x%lx\n", dart_ro_pte(probe->dart_dcp, iova),
+         dart_ro_pte(probe->dart_disp, iova));
+
+    /* read back the way kboot will: search, then translate the last byte */
+    u64 d_dcp = dart_search(probe->dart_dcp, (void *)pa);
+    u64 d_disp = dart_search(probe->dart_disp, (void *)pa);
+    u64 e_dcp = (u64)dart_translate(probe->dart_dcp, iova + size - 1);
+    u64 e_disp = (u64)dart_translate(probe->dart_disp, iova + size - 1);
+    bool ok = d_dcp == iova && d_disp == iova && e_dcp == pa + size - 1 && e_disp == pa + size - 1;
+    plog("map: read back dcp 0x%lx..0x%lx disp0 0x%lx..0x%lx: %s\n", d_dcp, e_dcp, d_disp, e_disp,
+         ok ? "OK" : "MISMATCH");
+}
+
+int dcp_t8132_probe(const display_config_t *cfg, bool map)
 {
     u64 vram_pa = 0, vram_size = 0;
     int n_segments = 0;
 
     probe_len = 0;
-    plog("M1N1-J773G-PROBE v1 (read-only)\n");
+    plog("M1N1-J773G-PROBE v2 (%s)\n", map ? "read-only + map /vram" : "read-only");
     plog("os firmware %s, ok=%d\n", os_firmware.string, dcp_t8132_firmware_ok());
     plog("boot fb 0x%lx %lux%lu stride %lu depth %lu\n", cur_boot_args.video.base,
          cur_boot_args.video.width, cur_boot_args.video.height, cur_boot_args.video.stride,
@@ -718,9 +796,15 @@ int dcp_t8132_probe(const display_config_t *cfg)
         int nb = dcp_t8132_inventory(probe.dart_disp, "dart-disp0", probe_inv[1]);
         if (dcp_faulted())
             goto release;
-        dcp_t8132_common_window(&probe, na, nb);
+        struct dcp_t8132_window win;
+        dcp_t8132_common_window(&probe, na, nb, map ? (int)(vram_size / SZ_16K) : 0, &win);
         if (dcp_faulted())
             goto release;
+        if (map) {
+            dcp_t8132_map_vram(&probe, &win, vram_pa, vram_size);
+            if (dcp_faulted())
+                goto release;
+        }
     }
 
     if (probe.dart_dcp) {

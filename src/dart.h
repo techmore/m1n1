@@ -31,6 +31,9 @@ struct dart_l2_info {
 int dart_ro_inventory(dart_dev_t *dart, struct dart_l2_info *out, int max);
 int dart_ro_l2_free_map(dart_dev_t *dart, int ttbr, u32 l1, u8 *free_map);
 void dart_ro_region_usage(dart_dev_t *dart, u64 *lo, u64 *hi, int *pages, int *used);
+u64 dart_ro_pte(dart_dev_t *dart, u64 iova);
+int dart_ro_map_existing(dart_dev_t *dart, u64 iova, u64 paddr, size_t len);
+void dart_ro_unmap_existing(dart_dev_t *dart, u64 iova, size_t len);
 void dart_lock_adt(const char *path, int instance);
 dart_dev_t *dart_init_fdt(void *dt, u32 phandle, int device, bool keep_pts);
 int dart_setup_pt_region(dart_dev_t *dart, const char *path, int device, u64 vm_base);

@@ -1434,6 +1434,7 @@ static int dt_device_set_reserved_mem_from_dart(int node, dart_dev_t *dart, cons
         return 0;
     }
 
+    printf("FDT: %s: iommu-addresses <%u 0x%lx 0x%lx>\n", name, phandle, iova, size);
     return dt_device_set_reserved_mem(node, name, phandle, iova, size);
 }
 

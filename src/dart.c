@@ -363,7 +363,9 @@ dart_dev_t *dart_init_adt(const char *path, int instance, int device, bool keep_
 /*
  * Adopt a DART that firmware set up, for lookups only: no DART register and no
  * page table is written (no stream enable, no TTBR or TCR change, no TLB
- * flush). Only dart_translate*() and dart_search() may be used on the result;
+ * flush). Only dart_translate*(), dart_search() and the dart_ro_*() helpers may
+ * be used on the result (dart_ro_map_existing() is the one exception that
+ * writes: leaf PTEs in existing in-region L2 tables, plus a TLB flush);
  * release it with dart_free_readonly(), never dart_shutdown().
  */
 dart_dev_t *dart_init_adt_readonly(const char *path, int instance, int device)
@@ -530,6 +532,74 @@ void dart_ro_region_usage(dart_dev_t *dart, u64 *lo, u64 *hi, int *pages, int *u
                 (*used)++;
         }
     }
+}
+
+/* Leaf PTE slot for iova in an existing in-region L2 table, or NULL. */
+static u64 *dart_ro_leaf(dart_dev_t *dart, u64 iova)
+{
+    u32 ttbr = (iova >> 36) & 0x3;
+    u32 l1 = (iova >> 25) & 0x7ff;
+
+    if (!dart->ro_ranges || (int)ttbr >= dart->params->ttbr_count || !dart->l1[ttbr] ||
+        !dart_table_ok(dart, dart->l1[ttbr]))
+        return NULL;
+    u64 l1e = dart->l1[ttbr][l1];
+    if (!(l1e & DART_PTE_VALID))
+        return NULL;
+    u64 *l2 = (u64 *)(FIELD_GET(dart->params->offset_mask, l1e) << DART_PTE_OFFSET_SHIFT);
+    if (!dart_table_ok(dart, l2))
+        return NULL;
+    return &l2[(iova >> 14) & 0x7ff];
+}
+
+/* Raw leaf PTE for iova (0 if there is none or it is not readable). */
+u64 dart_ro_pte(dart_dev_t *dart, u64 iova)
+{
+    u64 *pte = dart_ro_leaf(dart, iova);
+    return pte ? *pte : 0;
+}
+
+/*
+ * Map paddr..paddr+len at iova in a DART adopted with dart_init_adt_readonly(),
+ * writing only leaf PTEs into L2 tables that already exist inside its reserved
+ * pt-region. TTBRs, TCRs and L1 tables are never written and no table memory
+ * is allocated. Every target slot is checked first: if any L1 entry is
+ * missing, any L2 table lies outside the region or any target PTE is already
+ * valid, nothing is written and -1 is returned. Flushes the stream's TLB.
+ */
+int dart_ro_map_existing(dart_dev_t *dart, u64 iova, u64 paddr, size_t len)
+{
+    if (!dart->ro_ranges || !len || len % SZ_16K || paddr % SZ_16K || iova % SZ_16K)
+        return -1;
+
+    for (u64 off = 0; off < len; off += SZ_16K) {
+        u64 *pte = dart_ro_leaf(dart, iova + off);
+        if (!pte || (*pte & DART_PTE_VALID)) {
+            printf("dart[%lx %u]: iova 0x%lx not free in an in-region L2 (pte 0x%lx)\n",
+                   dart->regs, dart->device, iova + off, pte ? *pte : 0);
+            return -1;
+        }
+    }
+
+    for (u64 off = 0; off < len; off += SZ_16K) {
+        u64 *pte = dart_ro_leaf(dart, iova + off);
+        *pte = FIELD_PREP(dart->params->offset_mask, (paddr + off) >> DART_PTE_OFFSET_SHIFT) |
+               dart->params->pte_flags;
+    }
+
+    dart->params->tlb_invalidate(dart);
+    return 0;
+}
+
+/* Undo dart_ro_map_existing(): clear exactly those leaves, then flush. */
+void dart_ro_unmap_existing(dart_dev_t *dart, u64 iova, size_t len)
+{
+    for (u64 off = 0; off < len; off += SZ_16K) {
+        u64 *pte = dart_ro_leaf(dart, iova + off);
+        if (pte)
+            *pte = 0;
+    }
+    dart->params->tlb_invalidate(dart);
 }
 
 void dart_free_readonly(dart_dev_t *dart)

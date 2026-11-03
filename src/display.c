@@ -487,8 +487,9 @@ int display_configure(const char *config)
     int ret;
     bool probe = config && !strncmp(config, "probe", 5);
     if (probe) {
-        /* stage A: read-only probe, then boot on without display */
-        ret = dcp_t8132_probe(cfg);
+        /* stage A: read-only probe (",map": also map /vram in both DARTs),
+         * then boot on without display */
+        ret = dcp_t8132_probe(cfg, strstr(config, ",map") != NULL);
     } else {
         afk_epic_set_deadline(timeout_calculate(45 * 1000000));
         ret = display_configure_dcp(config);

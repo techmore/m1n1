@@ -72,6 +72,6 @@ dcp_dev_t *dcp_init(const display_config_t *config);
 
 int dcp_shutdown(dcp_dev_t *dcp, bool sleep);
 bool dcp_left_active(void);
-int dcp_t8132_probe(const display_config_t *cfg);
+int dcp_t8132_probe(const display_config_t *cfg, bool map);
 
 #endif
