@@ -119,6 +119,7 @@ CHICKENS_OBJECTS := $(patsubst %,chickens/%, \
 	twister.o)
 
 DCP_OBJECTS := $(patsubst %,dcp/%, \
+	aux_ep.o \
 	dpav_ep.o \
 	dptx_phy.o \
 	dptx_port_ep.o \

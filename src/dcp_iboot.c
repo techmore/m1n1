@@ -33,6 +33,7 @@ struct dcp_iboot_if {
     afk_epic_ep_t *epic;
     int channel;
     bool enabled;
+    u32 timing_cnt, color_cnt;
 
     union {
         u8 txbuf[TXBUF_LEN];
@@ -104,6 +105,8 @@ void dcp_ib_service_init(afk_epic_service_t *service, const char *name, const ch
                          s64 unit)
 {
     dcp_iboot_if_t *iboot = service->intf;
+    if (!iboot)
+        return;
     if (strncmp("disp0-service", eclass, 32) == 0) {
         if (iboot->enabled) {
             printf("dcp-iboot: service init for enabled 'disp0-service' on channel: %d\n",
@@ -132,7 +135,8 @@ dcp_iboot_if_t *dcp_ib_init(dcp_dev_t *dcp)
         return NULL;
 
     iboot->dcp = dcp;
-    iboot->epic = afk_epic_start_ep(dcp->afk, DCP_IBOOT_ENDPOINT, iboot_service_ops, false);
+    iboot->epic =
+        afk_epic_start_ep_intf(dcp->afk, DCP_IBOOT_ENDPOINT, iboot_service_ops, false, iboot);
     if (!iboot->epic) {
         printf("dcp-iboot: failed to initialize EPIC\n");
         goto err_free;
@@ -163,6 +167,36 @@ int dcp_ib_shutdown(dcp_iboot_if_t *iboot)
     return 0;
 }
 
+/*
+ * Reply capacity for compact (26.6) firmware. Commands are inline there and
+ * padded to the reply capacity, so ask for what the reply needs. Setters
+ * return transport status only and get no reply buffer, as the Gravity Linux
+ * driver sends SET_SURFACE.
+ */
+static size_t dcp_ib_compact_reply_cap(dcp_iboot_if_t *iboot, int op)
+{
+    u32 cnt;
+
+    switch (op) {
+        case IBOOT_SET_SURFACE:
+        case IBOOT_SET_POWER:
+        case IBOOT_SET_MODE:
+            return 0;
+        case IBOOT_GET_HPD:
+            return sizeof(struct rxcmd) + sizeof(struct get_hpd_resp);
+        case IBOOT_GET_TIMING_MODES:
+            cnt = (iboot->timing_cnt && iboot->timing_cnt <= 128) ? iboot->timing_cnt : 64;
+            return sizeof(struct rxcmd) + sizeof(struct get_tmode_resp) +
+                   cnt * sizeof(dcp_timing_mode_t);
+        case IBOOT_GET_COLOR_MODES:
+            cnt = (iboot->color_cnt && iboot->color_cnt <= 128) ? iboot->color_cnt : 64;
+            return sizeof(struct rxcmd) + sizeof(struct get_cmode_resp) +
+                   cnt * sizeof(dcp_color_mode_t);
+        default:
+            return 0x400;
+    }
+}
+
 static int dcp_ib_cmd(dcp_iboot_if_t *iboot, int op, size_t in_size)
 {
     size_t rxsize = RXBUF_LEN;
@@ -171,14 +205,43 @@ static int dcp_ib_cmd(dcp_iboot_if_t *iboot, int op, size_t in_size)
     iboot->txcmd.op = op;
     iboot->txcmd.len = sizeof(struct txcmd) + in_size;
 
-    return afk_epic_command(iboot->epic, iboot->channel, 0xc0, iboot->txbuf,
-                            sizeof(struct txcmd) + in_size, iboot->rxbuf, &rxsize);
+    if (!afk_epic_is_compact(iboot->epic))
+        return afk_epic_command(iboot->epic, iboot->channel, 0xc0, iboot->txbuf,
+                                sizeof(struct txcmd) + in_size, iboot->rxbuf, &rxsize);
+
+    rxsize = dcp_ib_compact_reply_cap(iboot, op);
+    memset(iboot->rxbuf, 0, rxsize);
+    int ret = afk_epic_command(iboot->epic, iboot->channel, 0xc0, iboot->txbuf,
+                               sizeof(struct txcmd) + in_size, rxsize ? iboot->rxbuf : NULL,
+                               rxsize ? &rxsize : NULL);
+    if (ret) {
+        printf("dcp-iboot: operation %d failed: %d\n", op, ret);
+        return ret < 0 ? ret : -1;
+    }
+
+    if (!dcp_ib_compact_reply_cap(iboot, op))
+        return 0;
+
+    if (rxsize < sizeof(struct rxcmd) || iboot->rxcmd.len < sizeof(struct rxcmd) ||
+        iboot->rxcmd.len > rxsize) {
+        printf("dcp-iboot: operation %d: short reply (%zu bytes, len %u)\n", op, rxsize,
+               iboot->rxcmd.len);
+        return -1;
+    }
+
+    return 0;
 }
 
 int dcp_ib_set_surface(dcp_iboot_if_t *iboot, dcp_layer_t *layer)
 {
     dcp_layer_t *cmd = (void *)iboot->txcmd.payload;
     *cmd = *layer;
+
+    /* 26.6 takes the layer followed by two more (zero) words, as Linux sends. */
+    if (afk_epic_is_compact(iboot->epic)) {
+        memset(iboot->txcmd.payload + sizeof(*layer), 0, 8);
+        return dcp_ib_cmd(iboot, IBOOT_SET_SURFACE, sizeof(*layer) + 8);
+    }
 
     return dcp_ib_cmd(iboot, IBOOT_SET_SURFACE, sizeof(*layer));
 }
@@ -199,6 +262,8 @@ int dcp_ib_get_hpd(dcp_iboot_if_t *iboot, int *timing_cnt, int *color_cnt)
     if (ret < 0)
         return ret;
 
+    iboot->timing_cnt = resp->timing_cnt;
+    iboot->color_cnt = resp->color_cnt;
     if (timing_cnt)
         *timing_cnt = resp->timing_cnt;
     if (color_cnt)
@@ -215,6 +280,14 @@ int dcp_ib_get_timing_modes(dcp_iboot_if_t *iboot, dcp_timing_mode_t **modes)
     if (ret < 0)
         return ret;
 
+    if (afk_epic_is_compact(iboot->epic) &&
+        (iboot->rxcmd.len < sizeof(struct rxcmd) + sizeof(*resp) ||
+         resp->count > (iboot->rxcmd.len - sizeof(struct rxcmd) - sizeof(*resp)) /
+                           sizeof(resp->modes[0]))) {
+        printf("dcp-iboot: mode list does not fit its reply\n");
+        return -1;
+    }
+
     *modes = resp->modes;
     return resp->count;
 }
@@ -226,6 +299,14 @@ int dcp_ib_get_color_modes(dcp_iboot_if_t *iboot, dcp_color_mode_t **modes)
 
     if (ret < 0)
         return ret;
+
+    if (afk_epic_is_compact(iboot->epic) &&
+        (iboot->rxcmd.len < sizeof(struct rxcmd) + sizeof(*resp) ||
+         resp->count > (iboot->rxcmd.len - sizeof(struct rxcmd) - sizeof(*resp)) /
+                           sizeof(resp->modes[0]))) {
+        printf("dcp-iboot: mode list does not fit its reply\n");
+        return -1;
+    }
 
     *modes = resp->modes;
     return resp->count;

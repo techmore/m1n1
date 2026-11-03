@@ -23,7 +23,19 @@ typedef struct {
     u32 dcp_index;
     u8 num_dptxports;
     u8 die;
+    /* DCP firmware speaks compact EPIC (macOS 26.6 on T8132) */
+    bool compact;
 } display_config_t;
+
+/* Options for the compact (T8132) HDMI bring-up, from the display= variable. */
+#define DCP_OPT_NO_SMC   BIT(0) /* do not switch the HDMI power GPIOs through SMC */
+#define DCP_OPT_NO_IOMFB BIT(1) /* do not start the IOMFB transport endpoint */
+#define DCP_OPT_MINIMAL  BIT(2) /* start only DPAV, iBoot and DPTX endpoints */
+#define DCP_OPT_TRACE    BIT(3) /* log compact EPIC traffic */
+
+#define DCP_MAX_AUX_EP 12
+
+struct dcp_iboot_if;
 
 typedef struct dcp_dev {
     dart_dev_t *dart_dcp;
@@ -39,11 +51,16 @@ typedef struct dcp_dev {
     u32 die;
     u32 dp2hdmi_pwr_gpio;
     u32 hdmi_pwr_gpio;
+    /* compact (T8132) bring-up */
+    bool compact;
+    struct dcp_iboot_if *iboot;
+    afk_epic_ep_t *aux_ep[DCP_MAX_AUX_EP];
 } dcp_dev_t;
 
 int dcp_connect_dptx(dcp_dev_t *dcp);
 int dcp_work(dcp_dev_t *dcp);
 
+void dcp_set_options(u32 options);
 dcp_dev_t *dcp_init(const display_config_t *config);
 
 int dcp_shutdown(dcp_dev_t *dcp, bool sleep);

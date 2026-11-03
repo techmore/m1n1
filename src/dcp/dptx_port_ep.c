@@ -67,6 +67,18 @@ struct dptxport_apcall_set_tiled {
     u32 retcode;
 };
 
+struct dptxport_apcall_drive_settings {
+    u32 retcode;
+    u8 _unk0[12];
+    u32 unk1;
+    u32 unk2;
+    u32 unk3;
+    u32 unk4;
+    u32 unk5;
+    u32 unk6;
+    u32 unk7;
+} __attribute__((packed));
+
 struct epic_service_call {
     u8 _pad0[2];
     u16 group;
@@ -83,6 +95,8 @@ typedef struct dptx_port {
     afk_epic_service_t *service;
     dptx_phy_t *phy;
     u32 link_rate, pending_link_rate;
+    u32 lane_count;
+    u32 drive_settings[2];
 } dptx_port_t;
 
 typedef struct dcp_dptx_if {
@@ -179,7 +193,7 @@ int dptxport_connect(afk_epic_service_t *service, u8 core, u8 atc, u8 die)
     if (resp.target != target)
         return -1;
     if (resp.unk != 0x100)
-        return -1;
+        dprintf("DPTXPort: connect reply unk 0x%x\n", resp.unk);
 
     return 0;
 }
@@ -246,14 +260,56 @@ static int dptxport_call_get_max_link_rate(afk_epic_service_t *service, void *re
 static int dptxport_call_get_max_lane_count(afk_epic_service_t *service, void *reply_,
                                             size_t reply_size)
 {
-    UNUSED(service);
+    struct dptx_port *port = service->cookie;
     struct dptxport_apcall_lane_count *reply = reply_;
 
     if (reply_size < sizeof(*reply))
         return -1;
 
+    if (port)
+        port->lane_count = 4;
     reply->retcode = 0;
     reply->lane_count = 4;
+
+    return 0;
+}
+
+/* Drive settings as the Gravity Linux driver answers them on 26.6. */
+static int dptxport_call_get_drive_settings(afk_epic_service_t *service, const void *data,
+                                            size_t data_size, void *reply_, size_t reply_size)
+{
+    struct dptx_port *port = service->cookie;
+    const struct dptxport_apcall_drive_settings *request = data;
+    struct dptxport_apcall_drive_settings *reply = reply_;
+
+    if (!port || reply_size < sizeof(*reply) || data_size < sizeof(*request))
+        return -1;
+
+    *reply = *request;
+    memset(reply_ + sizeof(*reply), 0, reply_size - sizeof(*reply));
+    /* retcode appears to be the lane count */
+    reply->retcode = port->lane_count;
+    reply->unk5 = port->drive_settings[0];
+    reply->unk6 = 0;
+    reply->unk7 = port->drive_settings[1];
+
+    return 0;
+}
+
+static int dptxport_call_set_drive_settings(afk_epic_service_t *service, const void *data,
+                                            size_t data_size, void *reply_, size_t reply_size)
+{
+    struct dptx_port *port = service->cookie;
+    const struct dptxport_apcall_drive_settings *request = data;
+    struct dptxport_apcall_drive_settings *reply = reply_;
+
+    if (!port || reply_size < sizeof(*reply) || data_size < sizeof(*request))
+        return -1;
+
+    *reply = *request;
+    reply->retcode = 0;
+    port->drive_settings[0] = reply->unk5;
+    port->drive_settings[1] = reply->unk7;
 
     return 0;
 }
@@ -278,6 +334,7 @@ static int dptxport_call_set_active_lane_count(afk_epic_service_t *service, cons
         case 0 ... 2:
         case 4:
             ret = dptx_phy_set_active_lane_count(port->phy, lane_count);
+            port->lane_count = lane_count;
             break;
         default:
             printf("DPTX-PORT: set_active_lane_count: invalid lane count:%lu\n", lane_count);
@@ -452,7 +509,18 @@ static int dptxport_call(afk_epic_service_t *service, u32 idx, const void *data,
         case DPTX_APCALL_SET_TILED_DISPLAY_HINTS:
             memcpy(reply, data, min(reply_size, data_size));
             return dptxport_call_set_tiled_display_hint(service, reply, reply_size);
+        case DPTX_APCALL_GET_DRIVE_SETTINGS:
+            if (afk_epic_is_compact(dptx->epic))
+                return dptxport_call_get_drive_settings(service, data, data_size, reply,
+                                                        reply_size);
+            goto ack;
+        case DPTX_APCALL_SET_DRIVE_SETTINGS:
+            if (afk_epic_is_compact(dptx->epic))
+                return dptxport_call_set_drive_settings(service, data, data_size, reply,
+                                                        reply_size);
+            goto ack;
         case DPTX_APCALL_ACTIVATE:
+            printf("DPTXPort: activating PHY\n");
             dptx_phy_activate(dptx->phy);
             memcpy(reply, data, min(reply_size, data_size));
             if (reply_size > 4)
@@ -464,8 +532,7 @@ static int dptxport_call(afk_epic_service_t *service, u32 idx, const void *data,
             // fallthrough
         /* we can silently ignore and just ACK these calls */
         case DPTX_APCALL_DEACTIVATE:
-        case DPTX_APCALL_SET_DRIVE_SETTINGS:
-        case DPTX_APCALL_GET_DRIVE_SETTINGS:
+        ack:
             memcpy(reply, data, min(reply_size, data_size));
             if (reply_size > 4)
                 memset(reply, 0, 4);
@@ -473,15 +540,72 @@ static int dptxport_call(afk_epic_service_t *service, u32 idx, const void *data,
     }
 }
 
+/*
+ * Compact firmware adds a second callback group whose command numbers overlap
+ * the link/PHY callbacks. Commands 3 and 4 carry an 80 byte record: keep the
+ * input prefix, clear the result word and the pointer-bearing tail (as the
+ * Gravity Linux driver does).
+ */
+static int dptxport_call_group1(u32 idx, const void *data, size_t data_size, void *reply,
+                                size_t reply_size)
+{
+    size_t preserved = min((size_t)32, min(data_size, reply_size));
+    size_t result_offset;
+
+    if (idx != 3 && idx != 4)
+        return -38;
+
+    memcpy(reply, data, preserved);
+    if (reply_size > preserved)
+        memset(reply + preserved, 0, reply_size - preserved);
+
+    result_offset = idx == 3 ? 0 : 16;
+    if (reply_size < result_offset + sizeof(u32))
+        return -1;
+    memset(reply + result_offset, 0, sizeof(u32));
+
+    return 0;
+}
+
+static int dptxport_call_group(afk_epic_service_t *service, u16 group, u32 idx, const void *data,
+                               size_t data_size, void *reply, size_t reply_size)
+{
+    if (group == 1)
+        return dptxport_call_group1(idx, data, data_size, reply, reply_size);
+    if (group)
+        return -38;
+    if (!service->cookie) {
+        /* not a port we track: acknowledge */
+        memcpy(reply, data, min(reply_size, data_size));
+        if (reply_size > 4)
+            memset(reply, 0, 4);
+        return 0;
+    }
+
+    return dptxport_call(service, idx, data, data_size, reply, reply_size);
+}
+
 static void dptxport_init(afk_epic_service_t *service, const char *name, const char *eclass,
                           s64 unit)
 {
     dcp_dptx_if_t *dptx = (dcp_dptx_if_t *)service->intf;
 
-    if (strcmp(name, "dcpdptx-port-epic"))
+    if (!dptx)
         return;
-    if (strcmp(eclass, "AppleDCPDPTXRemotePort"))
-        return;
+
+    if (afk_epic_is_compact(service->epic)) {
+        /* 26.6: "dcpdptx-port-epic" with the unit as suffix; port 0 is opened
+         * once both ports are known. */
+        if (strcmp(name, "dcpdptx-port-epic") || unit < 0)
+            return;
+        if (unit == 0)
+            service->defer_start = true;
+    } else {
+        if (strcmp(name, "dcpdptx-port-epic"))
+            return;
+        if (strcmp(eclass, "AppleDCPDPTXRemotePort"))
+            return;
+    }
 
     switch (unit) {
         case 0:
@@ -507,6 +631,12 @@ static const afk_epic_service_ops_t dcp_dptx_ops[] = {
         .init = dptxport_init,
         .call = dptxport_call,
     },
+    {
+        .name = "dcpdptx-port-epic",
+        .init = dptxport_init,
+        .call = dptxport_call,
+        .call_group = dptxport_call_group,
+    },
     {},
 };
 
@@ -520,6 +650,22 @@ int dcp_dptx_connect(dcp_dptx_if_t *dptx, dptx_phy_t *phy, u32 die, u32 port)
     }
 
     dptx->port[port].phy = dptx->phy = phy;
+
+    if (afk_epic_is_compact(dptx->epic)) {
+        printf("DPTXPort: connecting port %u to target %u (die %u)\n", port,
+               dptx_phy_dcp_output(phy), die);
+        int ret = dptxport_connect(dptx->port[port].service, 0, dptx_phy_dcp_output(phy), die);
+        if (ret) {
+            printf("DPTXPort: connect failed: %d\n", ret);
+            return ret;
+        }
+        ret = dptxport_request_display(dptx->port[port].service);
+        if (ret) {
+            printf("DPTXPort: display request failed: %d\n", ret);
+            return ret;
+        }
+        return 0;
+    }
 
     dptxport_connect(dptx->port[port].service, 0, dptx_phy_dcp_output(phy), die);
     dptxport_request_display(dptx->port[port].service);
@@ -552,7 +698,8 @@ dcp_dptx_if_t *dcp_dptx_init(dcp_dev_t *dcp, u32 num_dptxports)
         return NULL;
 
     dptx->dcp = dcp;
-    dptx->epic = afk_epic_start_ep(dcp->afk, DCP_DPTX_PORT_ENDPOINT, dcp_dptx_ops, true);
+    dptx->epic =
+        afk_epic_start_ep_intf(dcp->afk, DCP_DPTX_PORT_ENDPOINT, dcp_dptx_ops, true, dptx);
     if (!dptx->epic) {
         printf("dcp-dptx: failed to initialize EPIC\n");
         goto err_free;
@@ -562,6 +709,15 @@ dcp_dptx_if_t *dcp_dptx_init(dcp_dev_t *dcp, u32 num_dptxports)
     if (err < 0) {
         printf("dcp-dptx: failed to initialize DPTXRemotePort interface\n");
         goto err_shutdown;
+    }
+
+    if (afk_epic_is_compact(dptx->epic)) {
+        if (!dptx->port[0].service) {
+            printf("dcp-dptx: port 0 was not announced\n");
+            goto err_shutdown;
+        }
+        if (afk_epic_open_service(dptx->port[0].service) < 0)
+            goto err_shutdown;
     }
 
     return dptx;
