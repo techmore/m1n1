@@ -579,7 +579,7 @@ out_dart_dcp:
 }
 
 /* Stage A: a read-only look at the J773g display state, kept in /vram too. */
-static char probe_record[4096];
+static char probe_record[6144];
 static size_t probe_len;
 
 static void plog(const char *fmt, ...)
@@ -596,6 +596,78 @@ static void plog(const char *fmt, ...)
         memcpy(probe_record + probe_len, line, n);
         probe_len += n;
     }
+}
+
+/* 1920x1080, 4 bytes per pixel, plus m1n1's 24-page slack, in 16 KiB pages */
+#define DCP_T8132_FB_1080P_PAGES ((1920 * 1080 * 4 + 24 * 0x4000 + 0x3fff) / 0x4000)
+
+static struct dart_l2_info probe_inv[2][64];
+static u8 probe_free[2][0x800];
+
+/* Read-only: L1/L2 layout of one DART and how much of its pt-region is used. */
+static int dcp_t8132_inventory(dart_dev_t *dart, const char *name, struct dart_l2_info *inv)
+{
+    u64 lo, hi;
+    int pages, used;
+
+    int n = dart_ro_inventory(dart, inv, 64);
+    dart_ro_region_usage(dart, &lo, &hi, &pages, &used);
+    plog("%s: pt-region 0x%lx..0x%lx %d pages, %d hold tables; %d valid L1 slots\n", name, lo,
+         hi, pages, used, n);
+    for (int i = 0; i < n && i < 12; i++)
+        plog("  %s t%u l1[%u] -> 0x%lx %s %u leaves\n", name, inv[i].ttbr, inv[i].l1, inv[i].l2,
+             inv[i].in_region ? "in-region" : "OUTSIDE", inv[i].valid);
+    return n;
+}
+
+/*
+ * A window for a 1080p framebuffer that persists past m1n1: the same IOVA,
+ * free on both DARTs, inside L2 tables that live in the reserved pt-regions.
+ */
+static void dcp_t8132_common_window(dcp_dev_t *probe, int na, int nb)
+{
+    int found = 0, both_unused = 0;
+
+    for (int i = 0; i < na; i++) {
+        struct dart_l2_info *a = &probe_inv[0][i];
+        if (!a->in_region)
+            continue;
+        for (int j = 0; j < nb; j++) {
+            struct dart_l2_info *b = &probe_inv[1][j];
+            if (!b->in_region || b->ttbr != a->ttbr || b->l1 != a->l1)
+                continue;
+            if (dart_ro_l2_free_map(probe->dart_dcp, a->ttbr, a->l1, probe_free[0]) ||
+                dart_ro_l2_free_map(probe->dart_disp, b->ttbr, b->l1, probe_free[1]))
+                continue;
+            int best = 0, best_start = 0, run = 0;
+            for (int k = 0; k < 0x800; k++) {
+                run = (probe_free[0][k] && probe_free[1][k]) ? run + 1 : 0;
+                if (run > best) {
+                    best = run;
+                    best_start = k - run + 1;
+                }
+            }
+            u64 iova = ((u64)a->ttbr << 36) | ((u64)a->l1 << 25) | ((u64)best_start << 14);
+            plog("common t%u l1[%u]: %d free pages at iova 0x%lx%s\n", a->ttbr, a->l1, best, iova,
+                 best >= DCP_T8132_FB_1080P_PAGES ? " (fits 1080p)" : "");
+            found++;
+        }
+    }
+    if (!found)
+        plog("no reserved-backed L1 slot is shared by both DARTs\n");
+
+    /* slots where a new L2 table would be needed on both DARTs */
+    for (u32 l1 = 0; l1 < 0x800; l1++) {
+        bool used = false;
+        for (int i = 0; i < na && !used; i++)
+            used = probe_inv[0][i].ttbr == 0 && probe_inv[0][i].l1 == l1;
+        for (int j = 0; j < nb && !used; j++)
+            used = probe_inv[1][j].ttbr == 0 && probe_inv[1][j].l1 == l1;
+        if (!used)
+            both_unused++;
+    }
+    plog("t0 L1 slots unused by both DARTs: %d (1080p needs %d pages)\n", both_unused,
+         DCP_T8132_FB_1080P_PAGES);
 }
 
 int dcp_t8132_probe(const display_config_t *cfg)
@@ -638,6 +710,18 @@ int dcp_t8132_probe(const display_config_t *cfg)
     plog("darts adopted read-only: dcp %d disp %d\n", !!probe.dart_dcp, !!probe.dart_disp);
     if (dcp_faulted())
         goto release;
+
+    if (probe.dart_dcp && probe.dart_disp) {
+        int na = dcp_t8132_inventory(probe.dart_dcp, "dart-dcp", probe_inv[0]);
+        if (dcp_faulted())
+            goto release;
+        int nb = dcp_t8132_inventory(probe.dart_disp, "dart-disp0", probe_inv[1]);
+        if (dcp_faulted())
+            goto release;
+        dcp_t8132_common_window(&probe, na, nb);
+        if (dcp_faulted())
+            goto release;
+    }
 
     if (probe.dart_dcp) {
         int missing = dcp_t8132_check_firmware_mappings(cfg, &probe, &n_segments);

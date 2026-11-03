@@ -459,6 +459,79 @@ dart_dev_t *dart_init_adt_readonly(const char *path, int instance, int device)
     return dart;
 }
 
+/*
+ * Read-only inventory of a DART adopted with dart_init_adt_readonly(): one
+ * entry per valid L1 slot, telling whether its L2 table lies in the
+ * reserved pt-region (only those are read) and how many leaves are valid.
+ */
+int dart_ro_inventory(dart_dev_t *dart, struct dart_l2_info *out, int max)
+{
+    int n = 0;
+
+    for (int ttbr = 0; ttbr < dart->params->ttbr_count; ttbr++) {
+        if (!dart->l1[ttbr] || !dart_table_ok(dart, dart->l1[ttbr]))
+            continue;
+        for (u32 l1 = 0; l1 < 0x800; l1++) {
+            u64 pte = dart->l1[ttbr][l1];
+            if (!(pte & DART_PTE_VALID))
+                continue;
+            u64 *l2 = (u64 *)(FIELD_GET(dart->params->offset_mask, pte) << DART_PTE_OFFSET_SHIFT);
+            if (n >= max)
+                return n;
+            struct dart_l2_info *info = &out[n++];
+            info->ttbr = ttbr;
+            info->l1 = l1;
+            info->l2 = (u64)l2;
+            info->in_region = dart->ro_ranges && dart_table_ok(dart, l2);
+            info->valid = 0;
+            if (!info->in_region)
+                continue;
+            for (u32 i = 0; i < 0x800; i++)
+                if (l2[i] & DART_PTE_VALID)
+                    info->valid++;
+        }
+    }
+    return n;
+}
+
+/* Free (1) / used (0) leaves of one in-region L2 table; -1 if not readable. */
+int dart_ro_l2_free_map(dart_dev_t *dart, int ttbr, u32 l1, u8 *free_map)
+{
+    if (!dart->l1[ttbr] || !dart_table_ok(dart, dart->l1[ttbr]))
+        return -1;
+    u64 pte = dart->l1[ttbr][l1];
+    if (!(pte & DART_PTE_VALID))
+        return -1;
+    u64 *l2 = (u64 *)(FIELD_GET(dart->params->offset_mask, pte) << DART_PTE_OFFSET_SHIFT);
+    if (!dart_table_ok(dart, l2))
+        return -1;
+    for (u32 i = 0; i < 0x800; i++)
+        free_map[i] = !(l2[i] & DART_PTE_VALID);
+    return 0;
+}
+
+/* Pages of the reserved pt-region, and how many of them the tables use. */
+void dart_ro_region_usage(dart_dev_t *dart, u64 *lo, u64 *hi, int *pages, int *used)
+{
+    *lo = dart->ro_ranges ? dart->ro_lo[0] : 0;
+    *hi = dart->ro_ranges ? dart->ro_hi[0] : 0;
+    *pages = (*hi - *lo) / SZ_16K;
+    *used = 0;
+    for (int ttbr = 0; ttbr < dart->params->ttbr_count; ttbr++) {
+        if (!dart->l1[ttbr] || !dart_table_ok(dart, dart->l1[ttbr]))
+            continue;
+        (*used)++;
+        for (u32 l1 = 0; l1 < 0x800; l1++) {
+            u64 pte = dart->l1[ttbr][l1];
+            if (!(pte & DART_PTE_VALID))
+                continue;
+            u64 l2 = FIELD_GET(dart->params->offset_mask, pte) << DART_PTE_OFFSET_SHIFT;
+            if (l2 >= *lo && l2 < *hi)
+                (*used)++;
+        }
+    }
+}
+
 void dart_free_readonly(dart_dev_t *dart)
 {
     /* nothing was allocated for or written to the DART itself */

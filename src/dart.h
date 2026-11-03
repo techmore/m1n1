@@ -20,6 +20,17 @@ dart_dev_t *dart_init(uintptr_t base, u8 device, bool keep_pts, enum dart_type_t
 dart_dev_t *dart_init_adt(const char *path, int instance, int device, bool keep_pts);
 dart_dev_t *dart_init_adt_readonly(const char *path, int instance, int device);
 void dart_free_readonly(dart_dev_t *dart);
+
+struct dart_l2_info {
+    u8 ttbr;
+    u16 l1;
+    bool in_region;
+    u16 valid;
+    u64 l2;
+};
+int dart_ro_inventory(dart_dev_t *dart, struct dart_l2_info *out, int max);
+int dart_ro_l2_free_map(dart_dev_t *dart, int ttbr, u32 l1, u8 *free_map);
+void dart_ro_region_usage(dart_dev_t *dart, u64 *lo, u64 *hi, int *pages, int *used);
 void dart_lock_adt(const char *path, int instance);
 dart_dev_t *dart_init_fdt(void *dt, u32 phandle, int device, bool keep_pts);
 int dart_setup_pt_region(dart_dev_t *dart, const char *path, int device, u64 vm_base);
