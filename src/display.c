@@ -3,6 +3,7 @@
 #include "../build/build_cfg.h"
 
 #include "display.h"
+#include "exception.h"
 #include "adt.h"
 #include "assert.h"
 #include "dcp.h"
@@ -473,23 +474,50 @@ int display_configure(const char *config)
         return 0;
     }
 
-    /* stage A: read-only probe, then boot on without display */
-    if (config && !strncmp(config, "probe", 5))
-        return dcp_t8132_probe(cfg);
+    /*
+     * Any CPU exception (data abort, SError) during the J773g attempt is
+     * caught instead of rebooting: the faulting load yields a marker, the
+     * attempt is abandoned and the boot continues as without display. This
+     * does not cover resets that never reach the CPU as an exception.
+     */
+    int exc_before = exc_count;
+    dcp_set_exc_base(exc_before);
+    exc_guard = GUARD_MARK;
 
-    afk_epic_set_deadline(timeout_calculate(45 * 1000000));
-    int ret = display_configure_dcp(config);
-    afk_epic_set_deadline(0);
+    int ret;
+    bool probe = config && !strncmp(config, "probe", 5);
+    if (probe) {
+        /* stage A: read-only probe, then boot on without display */
+        ret = dcp_t8132_probe(cfg);
+    } else {
+        afk_epic_set_deadline(timeout_calculate(45 * 1000000));
+        ret = display_configure_dcp(config);
+        afk_epic_set_deadline(0);
+    }
+    sysop("dsb sy");
+    sysop("isb");
 
-    if (ret <= 0) {
+    if (exc_count != exc_before) {
+        printf("display: %d CPU exception(s) during the J773g attempt, giving up\n",
+               exc_count - exc_before);
+        ret = -1;
+    }
+
+    if (!probe && ret <= 0) {
         printf("display: J773g HDMI not set up (%d), continuing without display\n", ret);
         display_compact_failed = true;
         /* dcp and iboot are either both set (stop them) or both clear */
         display_shutdown(DCP_QUIESCED);
         dcp = NULL;
-        return 0;
+        ret = 0;
+    } else if (probe) {
+        display_compact_failed = true;
+        ret = 0;
     }
 
+    sysop("dsb sy");
+    sysop("isb");
+    exc_guard = GUARD_OFF;
     return ret;
 }
 

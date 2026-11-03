@@ -10,6 +10,7 @@
 
 #include "afk.h"
 #include "assert.h"
+#include "exception.h"
 #include "malloc.h"
 #include "string.h"
 #include "utils.h"
@@ -1160,7 +1161,13 @@ static int afk_compact_command(afk_epic_ep_t *epic, int channel, u16 sub_type, v
     }
 
     u64 deadline = timeout_calculate(AFK_COMMAND_TIMEOUT_US);
+    int exc_before = exc_count;
     while (!p->done) {
+        if (exc_count != exc_before) {
+            printf("AFK[ep:%02x]: CPU exception while waiting, giving up\n", epic->ep);
+            p->active = false;
+            return -1;
+        }
         if (timeout_expired(deadline)) {
             printf("AFK[ep:%02x]: timed out waiting for reply on interface %d\n", epic->ep,
                    channel);

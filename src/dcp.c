@@ -7,6 +7,7 @@
 #include "dcp.h"
 #include "dcp_iboot.h"
 #include "display.h"
+#include "exception.h"
 #include "firmware.h"
 #include "malloc.h"
 #include "pmgr.h"
@@ -30,6 +31,21 @@ struct adt_function_smc_gpio {
 static char dcp_pmgr_dev[16] = "DISP0_CPU0";
 static u32 dcp_die;
 static u32 dcp_options;
+static int dcp_exc_base;
+
+void dcp_set_exc_base(int count)
+{
+    dcp_exc_base = count;
+}
+
+/* a CPU exception was caught (and skipped) since the display attempt began */
+static bool dcp_faulted(void)
+{
+    if (exc_count == dcp_exc_base)
+        return false;
+    printf("dcp: CPU exception caught, stopping\n");
+    return true;
+}
 
 /*
  * Set when a DCP may still be running after a failure: its endpoints or
@@ -499,17 +515,17 @@ static dcp_dev_t *dcp_init_t8132(const display_config_t *cfg)
     dcp->compact = true;
 
     dcp->dart_dcp = dart_init_adt_readonly(cfg->dcp_dart, 0, sid);
-    if (!dcp->dart_dcp)
-        goto out_free;
-    dcp->dart_disp = dart_init_adt_readonly(cfg->disp_dart, 0, 0);
-    if (!dcp->dart_disp)
+    if (!dcp->dart_dcp || dcp_faulted())
         goto out_dart_dcp;
+    dcp->dart_disp = dart_init_adt_readonly(cfg->disp_dart, 0, 0);
+    if (!dcp->dart_disp || dcp_faulted())
+        goto out_darts;
 
     if (dcp_t8132_check_firmware_mappings(cfg, dcp, &n_segments) != 0 || !n_segments) {
         printf("dcp: DCP firmware is not mapped as iBoot leaves it running; skipping\n");
         goto out_darts;
     }
-    if (dcp_t8132_find_pool(dcp, &pool, &pool_dva, &pool_size) < 0)
+    if (dcp_t8132_find_pool(dcp, &pool, &pool_dva, &pool_size) < 0 || dcp_faulted())
         goto out_darts;
 
     if (stage == 1) {
@@ -526,7 +542,7 @@ static dcp_dev_t *dcp_init_t8132(const display_config_t *cfg)
         goto out_asc;
     rtkit_set_buffer_pool(dcp->rtkit, pool, pool_dva, pool_size);
 
-    if (!rtkit_boot(dcp->rtkit)) {
+    if (!rtkit_boot(dcp->rtkit) || dcp_faulted()) {
         printf("dcp: failed to boot RTKit\n");
         goto out_rtkit;
     }
@@ -541,7 +557,7 @@ static dcp_dev_t *dcp_init_t8132(const display_config_t *cfg)
         goto out_rtkit;
     afk_epic_set_compact(dcp->afk, true);
 
-    if (dcp_t8132_hdmi_init(dcp, cfg) < 0)
+    if (dcp_t8132_hdmi_init(dcp, cfg) < 0 || dcp_faulted())
         goto out_rtkit;
 
     return dcp;
@@ -553,10 +569,11 @@ out_rtkit:
 out_asc:
     asc_free(dcp->asc);
 out_darts:
-    dart_free_readonly(dcp->dart_disp);
+    if (dcp->dart_disp)
+        dart_free_readonly(dcp->dart_disp);
 out_dart_dcp:
-    dart_free_readonly(dcp->dart_dcp);
-out_free:
+    if (dcp->dart_dcp)
+        dart_free_readonly(dcp->dart_dcp);
     free(dcp);
     return NULL;
 }
@@ -595,11 +612,15 @@ int dcp_t8132_probe(const display_config_t *cfg)
 
     bool pre = dcp_t8132_precheck(cfg);
     plog("precheck %s\n", pre ? "ok" : "FAILED");
+    if (dcp_faulted())
+        goto faulted;
 
     bool dcp_on = pmgr_adt_power_is_active(cfg->dcp);
     bool phy_on = pmgr_adt_power_is_active(cfg->dptx_phy);
     plog("pmgr: dcp %s, dptx-phy %s\n", dcp_on ? "active" : "NOT active",
          phy_on ? "active" : "NOT active");
+    if (dcp_faulted())
+        goto faulted;
 
     if (display_get_vram(&vram_pa, &vram_size) == 0)
         plog("vram 0x%lx size 0x%lx\n", vram_pa, vram_size);
@@ -615,6 +636,8 @@ int dcp_t8132_probe(const display_config_t *cfg)
         probe.dart_disp = dart_init_adt_readonly(cfg->disp_dart, 0, 0);
     }
     plog("darts adopted read-only: dcp %d disp %d\n", !!probe.dart_dcp, !!probe.dart_disp);
+    if (dcp_faulted())
+        goto release;
 
     if (probe.dart_dcp) {
         int missing = dcp_t8132_check_firmware_mappings(cfg, &probe, &n_segments);
@@ -633,6 +656,8 @@ int dcp_t8132_probe(const display_config_t *cfg)
         int ret = dcp_t8132_find_pool(&probe, &pool, &pool_dva, &pool_size);
         plog("buffer pool: %s, 0x%lx bytes\n", ret ? "NOT usable" : "usable", pool_size);
     }
+    if (dcp_faulted())
+        goto release;
 
     if (dcp_on) {
         asc_dev_t *asc = asc_init(cfg->dcp);
@@ -644,11 +669,16 @@ int dcp_t8132_probe(const display_config_t *cfg)
         plog("dcp cpu: not read (not powered)\n");
     }
 
+release:
     if (probe.dart_disp)
         dart_free_readonly(probe.dart_disp);
     if (probe.dart_dcp)
         dart_free_readonly(probe.dart_dcp);
 
+faulted:
+    if (exc_count != dcp_exc_base)
+        plog("CPU exceptions caught: %d (see the m1n1 log for addresses)\n",
+             exc_count - dcp_exc_base);
     plog("end of probe\n");
 
     /* keep a copy at the end of /vram (reserved memory, readable from Linux) */

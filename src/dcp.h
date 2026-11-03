@@ -67,6 +67,7 @@ int dcp_connect_dptx(dcp_dev_t *dcp);
 int dcp_work(dcp_dev_t *dcp);
 
 void dcp_set_options(u32 options);
+void dcp_set_exc_base(int count);
 dcp_dev_t *dcp_init(const display_config_t *config);
 
 int dcp_shutdown(dcp_dev_t *dcp, bool sleep);
