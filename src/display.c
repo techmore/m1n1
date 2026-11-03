@@ -103,6 +103,25 @@ static const display_config_t display_config_m2_ultra = {
     .die = 1,
 };
 
+/*
+ * Mac mini (2024, M4), J773g: the HDMI port hangs off the main DCP through the
+ * T8122-style dptx-phy and an SMC powered DP-to-HDMI converter. Its macOS 26.6
+ * DCP firmware speaks compact EPIC. Opt-in only, see display_init().
+ */
+static const display_config_t display_config_j773g = {
+    .dcp = "/arm-io/dcp",
+    .dcp_dart = "/arm-io/dart-dcp",
+    .disp_dart = "/arm-io/dart-disp0",
+    .dp2hdmi_gpio = "/arm-io/dp2hdmi-gpio0",
+    .dptx_phy = "/arm-io/dptx-phy",
+    .pmgr_dev = "DISP_CPU",
+    .dcp_alias = "dcp",
+    .dcp_index = 0,
+    .num_dptxports = 2,
+    .die = 0,
+    .compact = true,
+};
+
 #define abs(x) ((x) >= 0 ? (x) : -(x))
 
 u64 display_mode_fb_size(dcp_timing_mode_t *mode)
@@ -253,6 +272,8 @@ const display_config_t *display_get_config(void)
         conf = &display_config_m2_pro_max;
     else if (adt_is_compatible(adt, 0, "J180dAP") || adt_is_compatible(adt, 0, "J475dAP"))
         conf = &display_config_m2_ultra;
+    else if (adt_is_compatible(adt, 0, "J773gAP"))
+        conf = &display_config_j773g;
     else
         conf = &display_config_m1;
 
@@ -311,7 +332,8 @@ int display_start_dcp(void)
         return -1;
     }
 
-    iboot = dcp_ib_init(dcp);
+    /* The compact bring-up starts the iBoot interface in its endpoint order. */
+    iboot = dcp->iboot ? dcp->iboot : dcp_ib_init(dcp);
     if (!iboot) {
         printf("display: failed to initialize DCP iBoot interface\n");
         dcp_shutdown(dcp, false);
@@ -323,6 +345,7 @@ int display_start_dcp(void)
 
 struct display_options {
     bool retina;
+    u32 dcp_options;
 };
 
 int display_parse_mode(const char *config, dcp_timing_mode_t *mode, struct display_options *opts)
@@ -356,6 +379,15 @@ int display_parse_mode(const char *config, dcp_timing_mode_t *mode, struct displ
     while (option && opts) {
         if (!strncmp(option + 1, "retina", 6))
             opts->retina = true;
+        /* J773g HDMI bring-up knobs */
+        else if (!strncmp(option + 1, "nosmc", 5))
+            opts->dcp_options |= DCP_OPT_NO_SMC;
+        else if (!strncmp(option + 1, "noiomfb", 7))
+            opts->dcp_options |= DCP_OPT_NO_IOMFB;
+        else if (!strncmp(option + 1, "minimal", 7))
+            opts->dcp_options |= DCP_OPT_MINIMAL;
+        else if (!strncmp(option + 1, "trace", 5))
+            opts->dcp_options |= DCP_OPT_TRACE;
         option = strchr(option + 1, ',');
     }
 
@@ -403,6 +435,7 @@ int display_configure(const char *config)
 #endif
 
     display_parse_mode(config, &want, &opts);
+    dcp_set_options(opts.dcp_options);
 
     u64 start_time = get_ticks();
 
@@ -436,15 +469,23 @@ int display_configure(const char *config)
     /* After boot DCP does not immediately report a connected display. Retry getting display
      * information for 2 seconds.
      */
-    while (retries++ < (DISPLAY_STATUS_RETRIES(display_is_dptx))) {
+    /* J773g: HDMI sinks were seen to need ~6 s after the port connect. */
+    int max_retries = dcp->compact ? 150 : DISPLAY_STATUS_RETRIES(display_is_dptx);
+    while (retries++ < max_retries) {
         dcp_work(dcp);
         hpd = dcp_ib_get_hpd(iboot, &timing_cnt, &color_cnt);
-        if (hpd < 0)
-            ret = hpd;
-        else if (hpd && timing_cnt && color_cnt)
+        /* the latest query decides; an early failure may be followed by a good one */
+        ret = hpd < 0 ? hpd : 0;
+        if (hpd > 0 && timing_cnt && color_cnt)
             break;
-        if (retries < DISPLAY_STATUS_RETRIES(display_is_dptx))
-            mdelay(DISPLAY_STATUS_DELAY);
+        if (retries < max_retries) {
+            /* keep servicing link training callbacks while waiting */
+            u64 until = timeout_calculate(DISPLAY_STATUS_DELAY * 1000);
+            while (dcp->compact && !timeout_expired(until))
+                dcp_work(dcp);
+            if (!dcp->compact)
+                mdelay(DISPLAY_STATUS_DELAY);
+        }
     }
     printf("display: waited %d ms for display status\n", (retries - 1) * DISPLAY_STATUS_DELAY);
     if (ret < 0) {
@@ -639,6 +680,16 @@ int display_init(void)
     else
         printf("display: Display is internal\n");
 
+    /*
+     * J773g: m1n1's DCP bring-up is opt-in, with "display=auto" (or a mode) in
+     * the m1n1 config. Without it the DCP is left exactly as iBoot handed it
+     * over, which is what the kernel's DCP driver expects today.
+     */
+    if (adt_is_compatible(adt, 0, "J773gAP")) {
+        printf("display: J773g HDMI is opt-in (display= variable), not touching DCP\n");
+        return 0;
+    }
+
     if ((cur_boot_args.video.width == 640 && cur_boot_args.video.height == 1136) &&
         chip_id != S5L8960X) {
         printf("display: Dummy framebuffer found, initializing display\n");
@@ -672,7 +723,13 @@ void display_shutdown(dcp_shutdown_mode mode)
         return;
 
     if (iboot) {
+        if (dcp->iboot == iboot)
+            dcp->iboot = NULL;
         dcp_ib_shutdown(iboot);
+        /* 26.6 DCP: never sleep it, the reset that follows a sleep is not known
+         * to be safe; quiesce it so the kernel's driver can wake it. */
+        if (dcp->compact)
+            mode = DCP_QUIESCED;
         switch (mode) {
             case DCP_QUIESCED:
                 printf("display: Quiescing DCP (unconditional)\n");
