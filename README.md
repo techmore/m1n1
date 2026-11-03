@@ -50,6 +50,9 @@ $ docker-compose run m1n1 make
 Our [wiki](https://asahilinux.org/docs/sw/m1n1-user-guide/) has more information on how to
 use m1n1.
 
+For the M4 Mac mini (J773g), see the [DockChannel console notes](docs/j773g-dockchannel-console.md)
+for observed initialization, cable guidance and untested serial/proxy paths.
+
 To install on an OS container based on macOS <12.1, use `m1n1.macho`:
 
 ```shell
