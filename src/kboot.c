@@ -64,6 +64,13 @@ extern u64 relocated_from;
 int dt_set_gpu(void *dt);
 int dt_set_display_handoff(void *dt);
 
+bool kboot_is_j773g(const void *fdt)
+{
+    return fdt && chip_id == T8132 && board_id == 42 && adt_is_compatible(adt, 0, "J773gAP") &&
+           !fdt_node_check_compatible(fdt, 0, "apple,j773g") &&
+           !fdt_node_check_compatible(fdt, 0, "apple,t8132");
+}
+
 u64 kboot_ram_base(void)
 {
     return cur_boot_args.phys_base;
