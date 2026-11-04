@@ -31,6 +31,8 @@ int kboot_boot(void *kernel);
 
 /* True only when the live machine and the supplied OS tree both describe J773g. */
 bool kboot_is_j773g(const void *fdt);
+/* The qualified J773g storage profile also requires all three T8132 placeholders. */
+bool kboot_j773g_has_ans(const void *fdt);
 
 /* Boot-args RAM range and boot framebuffer base, for the kboot_* SoC helpers */
 u64 kboot_ram_base(void);
