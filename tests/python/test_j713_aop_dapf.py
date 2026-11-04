@@ -100,6 +100,7 @@ static int fdt_stringlist_search(const void *dt,int id,const char *key,const cha
 {(void)dt;(void)id;(void)key;return !strcmp(value,"/arm-io/aop")||!strcmp(value,"/arm-io/pmp")?0:-1;}
 static int fdt_node_check_compatible(const void *dt,int node,const char *compat)
 {(void)dt;(void)node;(void)compat;return 0;}
+static bool kboot_is_j773g(const void *dt){(void)dt;return false;}
 '''
 
 TESTS = r'''
@@ -143,7 +144,7 @@ int main(void) {
  reset();memcpy(config,nodes[0].config,16*52);nodes[0].config=config;
  u64 start=1;memcpy(config+3*52+8,&start,8);assert(program()<0);untouched();
  /* The J713 caller leaves the AOP to kboot's handoff, even when it is active. */
- reset();assert(dapf_init_j713(&bank)==1);untouched();
+ reset();assert(dapf_init_t8132(&bank)==1);untouched();
  /* The windows, merged to whole pages; a short array or a wrong DART fails. */
  reset();struct dapf_window w[16];int n=dapf_t8132_windows("/arm-io/dart-aop",1,w,16);
  assert(n>0);for(int i=0;i<n;i++)printf("W %lx %lx\n",w[i].start,w[i].end);
