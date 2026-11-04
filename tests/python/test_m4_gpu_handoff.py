@@ -23,6 +23,7 @@ struct adt_segment_ranges { u64 phys, iova, remap; u32 size, unk; };
 static void *adt;
 static unsigned chip_id = T8132;
 static int fault;
+static bool live_j773g;
 static struct adt_segment_ranges segs[2];
 static u64 bases[4], sizes[4];
 static u32 irqs[4];
@@ -50,14 +51,18 @@ static const void *adt_getprop(void *a, int n, const char *p, u32 *len)
     }
     *len = 0; return NULL;
 }
+static bool kboot_is_j773g(const void *dt)
+{ return live_j773g && !fdt_node_check_compatible(dt, 0, "apple,j773g"); }
 ''' + production + r'''
 int main(void)
 {
     char blob[32768];
     const char *regions[] = {"uat-ttbs", "uat-pagetables", "uat-handoff", "uat-shared-l2", "gpu-fw-text", "gpu-fw-data"};
+    for (unsigned board = 0; board < 2; board++) {
+      live_j773g = board;
     for (fault = 0; fault <= 12; fault++) {
         assert(!fdt_create_empty_tree(blob, sizeof(blob)));
-        assert(!fdt_setprop_string(blob, 0, "compatible", "apple,j713"));
+        assert(!fdt_setprop_string(blob, 0, "compatible", board ? "apple,j773g" : "apple,j713"));
         int gpu = fdt_add_subnode(blob, 0, "gpu"); assert(gpu >= 0);
         assert(!fdt_setprop_string(blob, gpu, "compatible", "apple,agx-t8132"));
         assert(!fdt_setprop_u32(blob, gpu, "apple,g16-handoff-version", 99));
@@ -111,6 +116,7 @@ int main(void)
             }
             assert(!dt_set_gpu_m4(blob) && fdt_num_mem_rsv(blob) == 6);
         }
+    }
     }
     puts("M4 live resources, repeat publication and malformed/overlapping carveouts PASS");
     return 0;
