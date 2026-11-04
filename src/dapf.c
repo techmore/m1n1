@@ -3,6 +3,7 @@
 #include "dapf.h"
 #include "adt.h"
 #include "assert.h"
+#include "kboot.h"
 #include "malloc.h"
 #include "memory.h"
 #include "pmgr.h"
@@ -496,7 +497,7 @@ struct entry dapf_entries[] = {
     {"/arm-io/dart-isp", 5, "isp"}, {"/arm-io/dart-isp0", 5, "isp"}, {NULL, -1, NULL},
 };
 
-static int dapf_init_j713(void *dt)
+static int dapf_init_t8132(void *dt)
 {
     int ret = 0;
     int count = 0;
@@ -518,7 +519,7 @@ static int dapf_init_j713(void *dt)
         chosen >= 0 && fdt_getprop(dt, chosen, "linux-enablement-mac,dapf-handoff", NULL);
 
     if (!described) {
-        printf("dapf: No J713 consumer handoff requested; preserving firmware state\n");
+        printf("dapf: No T8132 consumer handoff requested; preserving firmware state\n");
         return 0;
     }
 
@@ -577,9 +578,10 @@ static int dapf_init_j713(void *dt)
 int dapf_init_fdt(const void *fdt)
 {
     if (chip_id == T8132) {
-        if (!fdt || fdt_node_check_compatible(fdt, 0, "apple,j713"))
+        bool j713 = fdt && !fdt_node_check_compatible(fdt, 0, "apple,j713");
+        if (!j713 && !kboot_is_j773g(fdt))
             return 0; /* No other M4 board's power/DAPF contract is qualified. */
-        return dapf_init_j713((void *)fdt);
+        return dapf_init_t8132((void *)fdt);
     }
 
     int ret = 0;

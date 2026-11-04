@@ -112,6 +112,7 @@ static int fdt_stringlist_search(const void *dt,int id,const char *key,const cha
 }
 static int fdt_node_check_compatible(const void *dt,int node,const char *compat)
 {(void)dt;(void)node;(void)compat;return 0;}
+static bool kboot_is_j773g(const void *dt){(void)dt;return false;}
 '''
 
 TESTS = r'''
@@ -124,7 +125,7 @@ static void preserved(void) {assert(!dart_enables&&!disables&&!filter_writes&&!d
 static void rejected(void) {assert(dapf_init("/arm-io/dart-pmp",1)<0);preserved();}
 int main(void) {
  /* Actual PMP metadata has no DAPF. Retain its independent consumer power. */
- reset();assert(dapf_init_j713((void *)1)==1);
+ reset();assert(dapf_init_t8132((void *)1)==1);
  assert(consumer_enables==1&&consumer_active&&instance_reads==1);preserved();
  reset();assert(!dapf_init("/arm-io/dart-pmp",1));preserved();
  assert(dapf_init("/arm-io/dart-pmp",0)<0);preserved();
@@ -169,18 +170,18 @@ int main(void) {
  assert(!dapf_init("/arm-io/dart-pmp",0));preserved();
  assert(dapf_init("/arm-io/dart-pmp",1)<0);preserved();
  /* Actual J713 caller return count/error semantics, including failed power. */
- reset();enable_error=true;assert(dapf_init_j713((void *)1)<0);
+ reset();enable_error=true;assert(dapf_init_t8132((void *)1)<0);
  assert(consumer_enables==1&&!consumer_active&&!instance_reads);preserved();
- reset();power_requested=0;assert(!dapf_init_j713((void *)1));
+ reset();power_requested=0;assert(!dapf_init_t8132((void *)1));
  assert(!consumer_enables&&!instance_reads);preserved();
- reset();power_requested=0;consumer_active=true;assert(dapf_init_j713((void *)1)==1);
+ reset();power_requested=0;consumer_active=true;assert(dapf_init_t8132((void *)1)==1);
  assert(!consumer_enables&&instance_reads==1);preserved();
- reset();nodes[2].instance_len=31;assert(dapf_init_j713((void *)1)<0);
+ reset();nodes[2].instance_len=31;assert(dapf_init_t8132((void *)1)<0);
  assert(consumer_enables==1&&consumer_active);preserved();
  reset();memcpy(scratch,nodes[2].instance,32);scratch[1].type=DAPF_INSTANCE_DAPF;
- nodes[2].instance=(const u8 *)scratch;assert(dapf_init_j713((void *)1)<0);
+ nodes[2].instance=(const u8 *)scratch;assert(dapf_init_t8132((void *)1)<0);
  assert(consumer_enables==1&&consumer_active);preserved();
- reset();handoff=false;nodes[2].instance_len=31;assert(!dapf_init_j713((void *)1));
+ reset();handoff=false;nodes[2].instance_len=31;assert(!dapf_init_t8132((void *)1));
  assert(!consumer_enables&&!instance_reads);preserved();
  /* The central T8132 branch is the only change to the legacy flow. */
  reset();chip_id=0x8110;dart_gates=true;assert(!dapf_init("/arm-io/dart-aop",1));

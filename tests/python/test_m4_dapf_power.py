@@ -7,7 +7,7 @@ import subprocess
 def test_j713_dapf_power_admission(tmp_path):
     repo = Path(__file__).resolve().parents[2]
     text = (repo / "src/dapf.c").read_text()
-    start = text.index("static int dapf_init_j713(")
+    start = text.index("static int dapf_init_t8132(")
     production = text[start:text.index("int dapf_init_fdt(", start)]
     harness = r'''
 #include <assert.h>
@@ -38,7 +38,7 @@ int main(void)
     for (power = -1; power <= 1; power++)
     for (enable_error = -1; enable_error <= 0; enable_error++) {
         dapf_calls = enables = 0;
-        int ret = dapf_init_j713((void *)1);
+        int ret = dapf_init_t8132((void *)1);
         bool failed = requested && requests_power && enable_error;
         assert(dapf_calls == (requested && !failed && power == 1));
         assert(enables == (requested && requests_power));
