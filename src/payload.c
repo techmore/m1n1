@@ -326,6 +326,25 @@ bool payload_logo(void **custom_128, void **custom_256)
     return false;
 }
 
+static int payload_prepare_t8132_storage(void *fdt, bool *retain)
+{
+    bool j713 = chip_id == T8132 && !fdt_node_check_compatible(fdt, 0, "apple,j713");
+    bool j773g = kboot_j773g_has_ans(fdt);
+
+    *retain = j773g;
+    if (!j713 && !j773g)
+        return 0;
+    if (!nvme_init()) {
+        printf("Payload: cannot prepare the M4 ANS session\n");
+        return -1;
+    }
+    if (j773g && !nvme_has_live_post_m4_session()) {
+        printf("Payload: J773g requires a live post-M4 ANS session\n");
+        return -1;
+    }
+    return 0;
+}
+
 int payload_run(void)
 {
     const char *target = adt_getprop(adt, 0, "target-type", NULL);
@@ -405,13 +424,11 @@ int payload_run(void)
     }
 
     if (kernel && fdt) {
+        bool retain_inline_nvme;
         /* The shared post-M4 U-Boot driver adopts ANS instead of starting it.
          * An inline ESP payload has not gone through boot_storage_load(). */
-        if (chip_id == T8132 && !fdt_node_check_compatible(fdt, 0, "apple,j713") &&
-            !nvme_init()) {
-            printf("Payload: cannot prepare the M4 ANS session\n");
+        if (payload_prepare_t8132_storage(fdt, &retain_inline_nvme))
             goto boot_failed;
-        }
         cpufreq_init();
         if (smp_start_secondaries() && chip_id == T8140) {
             printf("SMP: refusing payload handoff with missing T8140 CPUs\n");
@@ -464,13 +481,13 @@ int payload_run(void)
 
         if (kboot_boot(kernel))
             goto boot_failed;
-        if (boot_spec)
+        if (boot_spec || retain_inline_nvme)
             nvme_keep_running_for_linux = true;
         return 0;
 
     boot_failed:
         next_stage.entry = NULL;
-        if (boot_spec) {
+        if (boot_spec || retain_inline_nvme) {
             kboot_set_initrd(NULL, 0);
             nvme_keep_running_for_linux = false;
             nvme_shutdown();
