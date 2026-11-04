@@ -71,6 +71,28 @@ bool kboot_is_j773g(const void *fdt)
            !fdt_node_check_compatible(fdt, 0, "apple,t8132");
 }
 
+bool kboot_j773g_has_ans(const void *fdt)
+{
+    static const struct {
+        const char *alias;
+        const char *compatible;
+    } nodes[] = {
+        {"ans", "apple,t8132-nvme-ans2"},
+        {"ans-mbox", "apple,t8132-asc-mailbox"},
+        {"sart-ans", "apple,t8132-sart"},
+    };
+
+    if (!kboot_is_j773g(fdt))
+        return false;
+    for (unsigned i = 0; i < ARRAY_SIZE(nodes); i++) {
+        const char *path = fdt_get_alias(fdt, nodes[i].alias);
+        int node = path ? fdt_path_offset(fdt, path) : -1;
+        if (node < 0 || fdt_node_check_compatible(fdt, node, nodes[i].compatible))
+            return false;
+    }
+    return true;
+}
+
 u64 kboot_ram_base(void)
 {
     return cur_boot_args.phys_base;
@@ -6833,6 +6855,8 @@ int kboot_prepare_dt(void *fdt)
     if (dart_reserve_legacy_tables(dt, cur_boot_args.phys_base, cur_boot_args.mem_size))
         bail("FDT: couldn't reserve inherited display translation tables\n");
 
+    bool j713 = chip_id == T8132 && !fdt_node_check_compatible(dt, 0, "apple,j713");
+    bool j773g_ans = kboot_j773g_has_ans(dt);
     u64 image_end = (u64)_end;
     if (display_dart_tables_inherited()) {
         /* chainload_image carries the previous stage's live heap in this
@@ -6852,8 +6876,7 @@ int kboot_prepare_dt(void *fdt)
             image_end = max(image_end, inherited);
     }
     /* Both post-M4 storage paths retain firmware buffers in the m1n1 heap. */
-    if (chip_id == T8140 ||
-        (chip_id == T8132 && !fdt_node_check_compatible(dt, 0, "apple,j713"))) {
+    if (chip_id == T8140 || j713 || j773g_ans) {
         u64 ram_end, inherited = cur_boot_args.top_of_kernel_data;
         u64 high_water = heapblock_high_water();
 
@@ -6928,13 +6951,13 @@ int kboot_prepare_dt(void *fdt)
             bail("FDT: couldn't add reservation for M4+ SMP-RO CTRR area\n");
     }
 
-    if (chip_id == T8132 && !fdt_node_check_compatible(dt, 0, "apple,j713")) {
+    if (j713 || j773g_ans) {
         if (dt_reserve_bootloader_handoff())
             return -1;
         u64 start = min(ALIGN_UP((u64)adt + cur_boot_args.devtree_size, SZ_16K), (u64)_base);
         u64 end = cur_boot_args.top_of_kernel_data;
         if (end > start && fdt_add_mem_rsv(dt, start, end - start))
-            bail("FDT: couldn't reserve the J713 chainload high-water interval\n");
+            bail("FDT: couldn't reserve the T8132 chainload high-water interval\n");
     }
 
     /* setup console log buffer early to capture as much log as possible */
@@ -6998,8 +7021,7 @@ int kboot_prepare_dt(void *fdt)
         return -1;
     if (dt_set_pmgr())
         return -1;
-    if (chip_id == T8132 && !fdt_node_check_compatible(dt, 0, "apple,j713") &&
-        (dt_set_ans_nvme(false) || dt_set_t8132_lifecycle()))
+    if ((j713 || j773g_ans) && (dt_set_ans_nvme(false) || dt_set_t8132_lifecycle()))
         return -1;
 #ifndef RELEASE
     if (dt_transfer_virtios())
