@@ -382,6 +382,17 @@ static int smp_start_cpu(int index, const struct cpu_info *cpu)
     }
 
     target_cpu = index;
+    /* target_cpu moved onto its own SMP-shared cache line after the reset
+     * table was added. Gravity's reset-stack clean used to publish it
+     * incidentally; a core leaving reset must not observe the stale index. */
+    dc_civac_range(&target_cpu, sizeof(target_cpu));
+
+#ifdef J773G_COMPACT_STAGE2
+    /* smp_secondary_entry() publishes this pointer into its permanent reset
+     * table entry before normal cache coherency has been established. */
+    dc_civac_range(&secondary_stacks[index], sizeof(secondary_stacks[index]));
+#endif
+
     if (has_el3()) {
         _reset_stack = secondary_stacks_el3[index] + SECONDARY_STACK_SIZE; // EL3
         _reset_stack_el1 = secondary_stacks[index] + SECONDARY_STACK_SIZE; // EL1

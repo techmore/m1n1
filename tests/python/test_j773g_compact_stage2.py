@@ -33,5 +33,7 @@ def test_compact_profile_keeps_dynamic_stacks_reserved():
     assert "if (smp_alloc_stacks(index))" in smp
     assert "dc_civac_range(&_reset_stack, sizeof(_reset_stack))" in smp
     assert "dc_civac_range(&_reset_stack_el1, sizeof(_reset_stack_el1))" in smp
+    assert "dc_civac_range(&target_cpu, sizeof(target_cpu))" in smp
+    assert "dc_civac_range(&secondary_stacks[index], sizeof(secondary_stacks[index]))" in smp
     assert "fdt_add_mem_rsv(dt, (u64)stack, SECONDARY_STACK_SIZE)" in kboot
     assert "#ifdef J773G_COMPACT_STAGE2\n    ldr x1, [x1, x3, lsl #3]" in start
