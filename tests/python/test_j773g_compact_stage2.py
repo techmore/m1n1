@@ -25,7 +25,8 @@ def test_compact_profile_keeps_dynamic_stacks_reserved():
 
     assert "CFG += J773G_COMPACT_STAGE2" in makefile
     assert "--defsym=compact_stage2=1" in makefile
-    assert "DEFINED(compact_stage2) ? 0x140000 : 0x120000" in linker
+    assert "_section_align = DEFINED(compact_stage2) ? 0x4000 : 0x10000" in linker
+    assert "_file_limit = 0x120000" in linker
     assert "#ifdef J773G_COMPACT_STAGE2\nu8 *secondary_stacks[MAX_CPUS]" in smp
     assert "secondary_stacks[index] = memalign(SZ_16K, SECONDARY_STACK_SIZE)" in smp
     assert "fdt_add_mem_rsv(dt, (u64)stack, SECONDARY_STACK_SIZE)" in kboot

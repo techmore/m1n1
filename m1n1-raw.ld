@@ -6,6 +6,11 @@ _stack_size_el3 = 0x8000;
 /* We are actually relocatable */
 . = 0;
 
+/* Gravity's J773g stage 2 uses the native 16 KiB page alignment.  Retain the
+ * newer 64 KiB layout everywhere else, but avoid padding the compact ESP
+ * image into the stage-1/DCP boundary. */
+_section_align = DEFINED(compact_stage2) ? 0x4000 : 0x10000;
+
 PHDRS
 {
   hdr PT_LOAD;
@@ -18,19 +23,19 @@ SECTIONS {
     _base = .;
 
     _text_start = .;
-    .init : ALIGN(0x10000) {
+    .init : ALIGN(_section_align) {
         *(.init)
         *(.init.*)
     } :text
-    .text : ALIGN(0x10000) {
+    .text : ALIGN(_section_align) {
         *(.text)
         *(.text.*)
         . = ALIGN(8);
         *(.got.plt)
-        . = ALIGN(0x10000);
+        . = ALIGN(_section_align);
     } :text
     _text_size = . - _text_start;
-    .rodata : ALIGN(0x10000) {
+    .rodata : ALIGN(_section_align) {
         *(.rodata)
         *(.rodata.*)
         . = ALIGN(8);
@@ -53,14 +58,14 @@ SECTIONS {
         /* The load header's footprint (start.S) leaves an R_AARCH64_NONE here; keep it inside the
          * padding and out of the range apply_rela() walks, which only accepts relative entries. */
         *(.rela.init)
-        . = ALIGN(0x10000);
+        . = ALIGN(_section_align);
     } :rodata
     _rodata_end = .;
     _data_start = .;
-    .data : ALIGN(0x10000) {
+    .data : ALIGN(_section_align) {
         _smp_shared_start = .;
         *(.data.smp_shared)
-        . = ALIGN(0x10000);
+        . = ALIGN(_section_align);
         _smp_shared_end = .;
         *(.data)
         *(.data.*)
@@ -68,10 +73,10 @@ SECTIONS {
         _got_start = .;
         *(.got)
         _got_end = .;
-        . = ALIGN(0x10000);
+        . = ALIGN(_section_align);
         _file_end = .;
     } :data
-    .bss : ALIGN(0x10000) {
+    .bss : ALIGN(_section_align) {
         _bss_start = .;
         *(.bss)
         *(.bss.*)
@@ -79,19 +84,19 @@ SECTIONS {
         *(COMMON)
         _bss_end = .;
     } : data
-    .stack_el3 : ALIGN(0x10000) {
+    .stack_el3 : ALIGN(_section_align) {
         PROVIDE(_stack_top_el3 = .);
         . += _stack_size_el3 - 8;
         QUAD(0x5176694b43415453);
         PROVIDE(_stack_bot_el3 = .);
     }
-    .stack : ALIGN(0x10000) {
+    .stack : ALIGN(_section_align) {
         PROVIDE(_stack_top = .);
         . += _stack_size - 8;
         QUAD(0x544f424b43415453);
         PROVIDE(_stack_bot = .);
     } :data
-    ASSERT(ALIGN(0x10000) == ., "Stack size is not aligned!")
+    ASSERT(ALIGN(_section_align) == ., "Stack size is not aligned!")
     _data_size = . - _data_start;
     _end = .;
     _payload_start = .;
@@ -103,9 +108,7 @@ SECTIONS {
      * part that reaches that buffer is loaded onto it, and the DCP can overwrite it before
      * start.S has copied it. Past _file_end the image is only zeros (.bss), as before.
      */
-    /* The compact profile is only for the headless J773g stage 2, whose
-     * dummy framebuffer has no live panel-DCP log at this offset. */
-    _file_limit = DEFINED(compact_stage2) ? 0x140000 : 0x120000;
+    _file_limit = 0x120000;
     ASSERT(_file_end - _base <= _file_limit, "File part reaches the DCP log buffer after stage 1!")
 
     .symtab 0 : { *(.symtab) }
