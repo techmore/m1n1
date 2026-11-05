@@ -107,6 +107,10 @@ static void dc_cvac_range(void *a, u64 n) {
   (void)a;
   (void)n;
 }
+static void dc_civac_range(void *a, u64 n) {
+  (void)a;
+  (void)n;
+}
 static void ic_ivau_range(void *a, u64 n) {
   (void)a;
   (void)n;

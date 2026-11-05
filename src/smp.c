@@ -385,8 +385,17 @@ static int smp_start_cpu(int index, const struct cpu_info *cpu)
     if (has_el3()) {
         _reset_stack = secondary_stacks_el3[index] + SECONDARY_STACK_SIZE; // EL3
         _reset_stack_el1 = secondary_stacks[index] + SECONDARY_STACK_SIZE; // EL1
-    } else
+
+        /* The released core starts outside this core's cache-coherent
+         * domain. Publish the EL1 pointer before it reads the reset slot. */
+        dc_civac_range(&_reset_stack_el1, sizeof(_reset_stack_el1));
+    } else {
         _reset_stack = secondary_stacks[index] + SECONDARY_STACK_SIZE;
+    }
+
+    /* Match Gravity's proven reset-stack handoff: a DSB alone does not
+     * evict this core's dirty pointer for a core leaving reset. */
+    dc_civac_range(&_reset_stack, sizeof(_reset_stack));
 
     sysop("dsb sy");
 
