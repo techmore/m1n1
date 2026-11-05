@@ -85,6 +85,10 @@ static void write32(u64 a, u32 v) {
     spin_table[target_cpu].flag = 1;
 }
 static bool has_el3(void) { return false; }
+static int smp_alloc_stacks(int index) {
+  (void)index;
+  return 0;
+}
 static bool smp_old_vector_owned(u64 a) {
   (void)a;
   return false;

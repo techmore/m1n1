@@ -374,6 +374,13 @@ static int smp_start_cpu(int index, const struct cpu_info *cpu)
 
     memset(&spin_table[index], 0, sizeof(struct spin_table));
 
+    /* Match the proven Gravity lifetime: allocate the private stack only
+     * when this CPU is about to leave reset, after all core m1n1 setup. */
+    if (smp_alloc_stacks(index)) {
+        printf("failed to allocate stacks\n");
+        return -1;
+    }
+
     target_cpu = index;
     if (has_el3()) {
         _reset_stack = secondary_stacks_el3[index] + SECONDARY_STACK_SIZE; // EL3
@@ -715,7 +722,9 @@ int smp_init(void)
         cpu_info[i].die = FIELD_GET(CPU_REG_DIE, reg);
         cpu_info[i].impl_reg = cpu_impl_reg[0];
 
-        if (i != boot_cpu_idx && smp_alloc_stacks(i)) {
+        /* T8142 publishes permanent reset stacks before the first start.
+         * Other chips allocate at smp_start_cpu(), as Gravity does. */
+        if (chip_id == T8142 && i != boot_cpu_idx && smp_alloc_stacks(i)) {
             printf("SMP: failed to allocate stacks for CPU %d\n", i);
             return -1;
         }
@@ -753,6 +762,10 @@ static void smp_start_t8152(void)
     for (int i = 0; i < 12; i++) {
         if (i == boot_cpu_idx || spin_table[i].flag)
             continue;
+        if (smp_alloc_stacks(i)) {
+            smp_start_fail_mask |= BIT(i);
+            break;
+        }
         const struct cpu_info *cpu = &cpu_info[i];
         u64 rvbar = read64(cpu->impl_reg);
         if ((rvbar & RVBAR_LOCK) && (rvbar & RVBAR_ADDR) != (u64)_vectors_start) {

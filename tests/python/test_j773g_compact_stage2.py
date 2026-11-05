@@ -29,5 +29,7 @@ def test_compact_profile_keeps_dynamic_stacks_reserved():
     assert "_file_limit = 0x120000" in linker
     assert "#ifdef J773G_COMPACT_STAGE2\nu8 *secondary_stacks[MAX_CPUS]" in smp
     assert "secondary_stacks[index] = memalign(SZ_16K, SECONDARY_STACK_SIZE)" in smp
+    assert "Match the proven Gravity lifetime" in smp
+    assert "if (smp_alloc_stacks(index))" in smp
     assert "fdt_add_mem_rsv(dt, (u64)stack, SECONDARY_STACK_SIZE)" in kboot
     assert "#ifdef J773G_COMPACT_STAGE2\n    ldr x1, [x1, x3, lsl #3]" in start
