@@ -1,10 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 
+#include "../build/build_cfg.h"
+
 #include "smp.h"
 #include "adt.h"
 #include "aic.h"
 #include "aic_regs.h"
 #include "cpu_regs.h"
+#include "malloc.h"
 #include "memory.h"
 #include "pmgr.h"
 #include "soc.h"
@@ -44,8 +47,13 @@ void *_reset_stack_el1 SMP_SHARED;
 u8 dummy_stack[DUMMY_STACK_SIZE];     // Highest EL
 u8 dummy_stack_el1[DUMMY_STACK_SIZE]; // EL1 stack if EL3 exists
 
+#ifdef J773G_COMPACT_STAGE2
+u8 *secondary_stacks[MAX_CPUS];
+u8 *secondary_stacks_el3[MAX_EL3_CPUS];
+#else
 u8 secondary_stacks[MAX_CPUS][SECONDARY_STACK_SIZE] ALIGNED(0x4000);
 u8 secondary_stacks_el3[MAX_EL3_CPUS][SECONDARY_STACK_SIZE] ALIGNED(0x4000);
+#endif
 
 static bool wfe_mode SMP_SHARED = false;
 
@@ -73,6 +81,32 @@ static struct {
 
 u64 smp_started_mask;
 u64 smp_start_fail_mask;
+
+#ifdef J773G_COMPACT_STAGE2
+static int smp_alloc_stacks(int index)
+{
+    if (!secondary_stacks[index])
+        secondary_stacks[index] = memalign(SZ_16K, SECONDARY_STACK_SIZE);
+    if (!secondary_stacks[index])
+        return -1;
+
+    if (has_el3()) {
+        if (index >= MAX_EL3_CPUS)
+            return -1;
+        if (!secondary_stacks_el3[index])
+            secondary_stacks_el3[index] = memalign(SZ_16K, SECONDARY_STACK_SIZE);
+        if (!secondary_stacks_el3[index])
+            return -1;
+    }
+    return 0;
+}
+#else
+static int smp_alloc_stacks(int index)
+{
+    UNUSED(index);
+    return 0;
+}
+#endif
 
 static int t8152_cpu_index(u64 mpidr)
 {
@@ -681,6 +715,11 @@ int smp_init(void)
         cpu_info[i].die = FIELD_GET(CPU_REG_DIE, reg);
         cpu_info[i].impl_reg = cpu_impl_reg[0];
 
+        if (i != boot_cpu_idx && smp_alloc_stacks(i)) {
+            printf("SMP: failed to allocate stacks for CPU %d\n", i);
+            return -1;
+        }
+
         /* Publish a permanent stack before the first reset, including late entries. */
         if (chip_id == T8142 && i != boot_cpu_idx) {
             /* ADT reg omits Aff2, which is 1 on the M5 performance cluster. */
@@ -983,4 +1022,18 @@ u64 smp_get_release_addr(int cpu)
     target->args[2] = 0;
     target->args[3] = 0;
     return (u64)&target->target;
+}
+
+void *smp_stack_base(int cpu)
+{
+    if (cpu < 0 || cpu >= MAX_CPUS)
+        return NULL;
+    return secondary_stacks[cpu];
+}
+
+void *smp_stack_el3_base(int cpu)
+{
+    if (cpu < 0 || cpu >= MAX_EL3_CPUS)
+        return NULL;
+    return secondary_stacks_el3[cpu];
 }

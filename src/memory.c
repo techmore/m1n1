@@ -760,7 +760,7 @@ void mmu_init_secondary_local(void)
      * both to be safe since this code only runs once after a core is started for the first time.
      */
     sysop("dsb sy"); // ensure all stores to RAM with Device-nGnRnE semantics are completed
-    dc_ivac_range(secondary_stacks[smp_id()], SECONDARY_STACK_SIZE);
+    dc_ivac_range(smp_stack_base(smp_id()), SECONDARY_STACK_SIZE);
     sysop("dsb sy"); // ensure cache invalidation is completed
 
     write_sctlr(sctlr);

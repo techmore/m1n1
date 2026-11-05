@@ -103,7 +103,9 @@ SECTIONS {
      * part that reaches that buffer is loaded onto it, and the DCP can overwrite it before
      * start.S has copied it. Past _file_end the image is only zeros (.bss), as before.
      */
-    _file_limit = 0x120000;
+    /* The compact profile is only for the headless J773g stage 2, whose
+     * dummy framebuffer has no live panel-DCP log at this offset. */
+    _file_limit = DEFINED(compact_stage2) ? 0x140000 : 0x120000;
     ASSERT(_file_end - _base <= _file_limit, "File part reaches the DCP log buffer after stage 1!")
 
     .symtab 0 : { *(.symtab) }

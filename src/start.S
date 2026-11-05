@@ -362,9 +362,15 @@ cpu_reset:
     add x3, x3, x5, lsl #1
     adrp x1, secondary_stacks
     add x1, x1, :lo12:secondary_stacks
+#ifdef J773G_COMPACT_STAGE2
+    ldr x1, [x1, x3, lsl #3]
+    cbz x1, 5f
+    add x1, x1, #SECONDARY_STACK_SIZE
+#else
     add x3, x3, #1
     mov x5, #SECONDARY_STACK_SIZE
     madd x1, x3, x5, x1
+#endif
     b 3f
 5:
     wfe

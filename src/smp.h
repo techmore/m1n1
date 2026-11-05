@@ -7,9 +7,6 @@
 #include "types.h"
 #include "utils.h"
 
-extern u8 secondary_stacks[MAX_CPUS][SECONDARY_STACK_SIZE];
-extern u8 secondary_stacks_el3[MAX_EL3_CPUS][SECONDARY_STACK_SIZE];
-
 void smp_secondary_entry(void);
 int smp_secondary_prepare(void);
 void smp_secondary_prep_el3(void);
@@ -37,6 +34,8 @@ bool smp_has_pending_calls(void);
 bool smp_is_alive(int cpu);
 uint64_t smp_get_mpidr(int cpu);
 u64 smp_get_release_addr(int cpu);
+void *smp_stack_base(int cpu);
+void *smp_stack_el3_base(int cpu);
 void smp_set_wfe_mode(bool new_mode);
 void smp_send_ipi(int cpu);
 

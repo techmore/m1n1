@@ -110,10 +110,25 @@ endif
 CFG += ESP_STAGE2
 endif
 
+# ESP stage 2 images loaded by the legacy M4 stage 1 have a strict file-size
+# ceiling. Keep secondary stacks out of the raw image and reserve their heap
+# allocations in the handed-off FDT instead.
+ifeq ($(J773G_COMPACT_STAGE2),1)
+ifneq ($(ESP_STAGE2),1)
+$(error J773G_COMPACT_STAGE2 requires ESP_STAGE2=1)
+endif
+CFG += J773G_COMPACT_STAGE2
+endif
+
 
 LDFLAGS := -EL -maarch64elf --no-undefined -X -Bsymbolic \
 	-z notext --no-apply-dynamic-relocs --orphan-handling=warn \
 	-z nocopyreloc --gc-sections -pie
+
+RAW_LDFLAGS :=
+ifeq ($(J773G_COMPACT_STAGE2),1)
+RAW_LDFLAGS += --defsym=compact_stage2=1
+endif
 
 MINILZLIB_OBJECTS := $(patsubst %,minilzlib/%, \
 	dictbuf.o inputbuf.o lzma2dec.o lzmadec.o rangedec.o xzstream.o)
@@ -294,7 +309,7 @@ build/$(NAME).elf: $(BUILD_ALL_OBJS) m1n1.ld
 
 build/$(NAME)-raw.elf: $(BUILD_ALL_OBJS) m1n1-raw.ld
 	$(QUIET)echo "  LDRAW $@"
-	$(QUIET)$(LD) -T m1n1-raw.ld $(LDFLAGS) -o $@ $(BUILD_ALL_OBJS)
+	$(QUIET)$(LD) -T m1n1-raw.ld $(LDFLAGS) $(RAW_LDFLAGS) -o $@ $(BUILD_ALL_OBJS)
 
 build/$(NAME).macho: build/$(NAME).elf
 	$(QUIET)echo "  MACHO $@"

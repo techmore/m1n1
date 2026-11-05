@@ -923,6 +923,19 @@ static int dt_set_cpus(void)
             continue;
         }
 
+#ifdef J773G_COMPACT_STAGE2
+        void *stack = smp_stack_base(idx);
+        if (!stack || fdt_add_mem_rsv(dt, (u64)stack, SECONDARY_STACK_SIZE))
+            bail_cleanup("FDT: couldn't reserve CPU stack\n");
+        printf("FDT: Reserving stack for CPU %d 0x%lx\n", cpu, (u64)stack);
+        if (has_el3()) {
+            void *el3_stack = smp_stack_el3_base(idx);
+            if (!el3_stack || fdt_add_mem_rsv(dt, (u64)el3_stack, SECONDARY_STACK_SIZE))
+                bail_cleanup("FDT: couldn't reserve EL3 CPU stack\n");
+            printf("FDT: Reserving EL3 stack for CPU %d 0x%lx\n", cpu, (u64)el3_stack);
+        }
+#endif
+
         u64 mpidr = smp_get_mpidr(idx);
         u64 release_addr = smp_get_release_addr(idx);
         if (fdt_setprop_inplace_u64(dt, node, "cpu-release-addr", release_addr))
