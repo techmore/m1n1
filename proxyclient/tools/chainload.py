@@ -4,6 +4,7 @@ import sys, pathlib
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
 import argparse, pathlib, time
+from serial import SerialException
 
 parser = argparse.ArgumentParser(description='Mach-O loader for m1n1')
 parser.add_argument('-q', '--quiet', action="store_true", help="Disable framebuffer")
@@ -238,11 +239,21 @@ if args.call:
 elif args.vector_only:
     print(f"Vectoring to 0x{stub.addr:x}; no next-stage proxy request will be sent")
     p.request(p.P_VECTOR, stub.addr, fw_dest + bootargs_off, image_addr, new_base, copy_size)
+    # This marker is deliberately after the proxy request has completed.  A
+    # host-side transport switch keyed to the earlier line can otherwise tear
+    # down the CDC carrier before P_VECTOR reaches stage 1.
+    print(f"Vector complete at 0x{stub.addr:x}", flush=True)
     if args.capture:
         deadline = time.monotonic() + max(0, args.capture_seconds)
         with args.capture.open('wb') as output:
             while time.monotonic() < deadline:
-                data = iface.dev.read(4096)
+                try:
+                    data = iface.dev.read(4096)
+                except (OSError, SerialException):
+                    # A vector-only handoff normally removes the stage-1 CDC
+                    # device.  That disconnect completes capture; it is not a
+                    # failed proxy request or evidence about the next stage.
+                    break
                 if data:
                     output.write(data)
     sys.exit(0)
